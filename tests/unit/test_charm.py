@@ -164,6 +164,7 @@ def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog):
         "Creating storage class csi-cinder-default",
         "Setting secret for DaemonSet/csi-cinder-nodeplugin",
         "Setting secret for Deployment/csi-cinder-controllerplugin",
+        "Configuring cinder topology awareness=true",
     }
 
     caplog.clear()
