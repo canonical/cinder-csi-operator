@@ -2,13 +2,23 @@
 # See LICENSE file for licensing details.
 """Implementation of cinder-csi specific details of the kubernetes manifests."""
 
+import datetime
 import logging
 import pickle
 from hashlib import md5
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from lightkube.codecs import AnyResource, from_dict
-from ops.manifests import Addition, ConfigRegistry, ManifestLabel, Manifests, Patch
+from lightkube.resources.core_v1 import Event, Pod
+from ops.manifests import (
+    Addition,
+    ConfigRegistry,
+    HashableResource,
+    ManifestLabel,
+    Manifests,
+    Patch,
+)
+from ops.manifests.manipulations import AnyCondition
 
 log = logging.getLogger(__file__)
 NAMESPACE = "kube-system"
@@ -144,6 +154,51 @@ class StorageManifests(Manifests):
             if not self.config.get(prop):
                 return f"Storage manifests waiting for definition of {prop}"
         return None
+
+    def is_ready(self, obj: HashableResource, cond: AnyCondition) -> Optional[bool]:
+        """Determine if the resource is ready."""
+        if not super().is_ready(obj, cond):
+            object_events = collect_events(self.client, obj.resource)
+            if obj.kind in ["Deployment", "DaemonSet"]:
+                involved_pods = self.client.list(
+                    Pod, namespace=obj.namespace, labels={"app": obj.name}
+                )
+                object_events += [
+                    event for pod in involved_pods for event in collect_events(self.client, pod)
+                ]
+            for event in sorted(object_events, key=by_localtime):
+                log.info(
+                    "Event %s/%s %s msg=%s",
+                    event.involvedObject.kind,
+                    event.involvedObject.name,
+                    event.lastTimestamp
+                    and event.lastTimestamp.astimezone()
+                    or "Date not recorded",
+                    event.message,
+                )
+
+        return super().is_ready(obj, cond)
+
+
+def by_localtime(event: Event) -> datetime.datetime:
+    """Return the last timestamp of the event in local time."""
+    dt = event.lastTimestamp or datetime.datetime.now(datetime.timezone.utc)
+    return dt.astimezone()
+
+
+def collect_events(client, resource: AnyResource) -> List[Event]:
+    """Collect events from the resource."""
+    kind: str = resource.kind or type(resource).__name__
+    return list(
+        client.list(
+            Event,
+            namespace=resource.metadata.namespace,
+            fields={
+                "involvedObject.kind": kind,
+                "involvedObject.name": resource.metadata.name,
+            },
+        )
+    )
 
 
 class UpdateControllerPlugin(Patch):
