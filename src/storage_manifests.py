@@ -57,12 +57,16 @@ class CreateStorageClass(Addition):
         storage_name = STORAGE_CLASS_NAME.format(type=self.type)
         log.info(f"Creating storage class {storage_name}")
         reclaim_policy: str = self.manifests.config.get("reclaim-policy") or "Delete"
+        is_default: str = "true" if self.manifests.config.get("storage-class-default") else "false"
 
         sc = from_dict(
             dict(
                 apiVersion="storage.k8s.io/v1",
                 kind="StorageClass",
-                metadata=dict(name=storage_name),
+                metadata=dict(
+                    name=storage_name,
+                    annotations={"storageclass.kubernetes.io/is-default-class": is_default},
+                ),
                 provisioner="cinder.csi.openstack.org",
                 reclaimPolicy=reclaim_policy.title(),
                 volumeBindingMode="WaitForFirstConsumer",

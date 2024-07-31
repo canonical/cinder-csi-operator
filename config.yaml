@@ -55,3 +55,11 @@ options:
       StorageClass.
 
       Potential values are "Delete" or "Retain"
+
+  storage-class-default:
+    type: boolean
+    default: false
+    description: |
+      https://kubernetes.io/docs/tasks/administer-cluster/change-default-storage-class/
+      
+      Whether to set the storage class for the Cinder CSI driver as the cluster default
