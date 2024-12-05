@@ -8,6 +8,7 @@ import pickle
 from hashlib import md5
 from typing import Dict, List, Optional
 
+from lightkube import Client
 from lightkube.codecs import AnyResource, from_dict
 from lightkube.resources.core_v1 import Event, Pod
 from ops.manifests import (
@@ -163,32 +164,27 @@ class StorageManifests(Manifests):
                 log_events(self.client, obj)
             except Exception as e:
                 log.error("failed to log events: %s", e)
-            
+
         return is_ready
 
-def log_events(client, obj: HashableResource) -> None:
-    """Log events for the object."""
 
+def log_events(client: Client, obj: HashableResource) -> None:
+    """Log events for the object."""
     object_events = collect_events(client, obj.resource)
 
     if obj.kind in ["Deployment", "DaemonSet"]:
-        involved_pods = client.list(
-            Pod, namespace=obj.namespace, labels={"app": obj.name}
-        )
-        object_events += [
-            event for pod in involved_pods for event in collect_events(client, pod)
-        ]
+        involved_pods = client.list(Pod, namespace=obj.namespace, labels={"app": obj.name})
+        object_events += [event for pod in involved_pods for event in collect_events(client, pod)]
 
     for event in sorted(object_events, key=by_localtime):
         log.info(
             "Event %s/%s %s msg=%s",
             event.involvedObject.kind,
             event.involvedObject.name,
-            event.lastTimestamp
-            and event.lastTimestamp.astimezone()
-            or "Date not recorded",
+            event.lastTimestamp and event.lastTimestamp.astimezone() or "Date not recorded",
             event.message,
         )
+
 
 def by_localtime(event: Event) -> datetime.datetime:
     """Return the last timestamp of the event in local time."""
@@ -196,9 +192,10 @@ def by_localtime(event: Event) -> datetime.datetime:
     return dt.astimezone()
 
 
-def collect_events(client, resource: AnyResource) -> List[Event]:
+def collect_events(client: Client, resource: AnyResource) -> List[Event]:
     """Collect events from the resource."""
     kind: str = resource.kind or type(resource).__name__
+    return list(
         client.list(
             Event,
             namespace=resource.metadata.namespace,
