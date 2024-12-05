@@ -157,28 +157,38 @@ class StorageManifests(Manifests):
 
     def is_ready(self, obj: HashableResource, cond: AnyCondition) -> Optional[bool]:
         """Determine if the resource is ready."""
-        if not super().is_ready(obj, cond):
-            object_events = collect_events(self.client, obj.resource)
-            if obj.kind in ["Deployment", "DaemonSet"]:
-                involved_pods = self.client.list(
-                    Pod, namespace=obj.namespace, labels={"app": obj.name}
-                )
-                object_events += [
-                    event for pod in involved_pods for event in collect_events(self.client, pod)
-                ]
-            for event in sorted(object_events, key=by_localtime):
-                log.info(
-                    "Event %s/%s %s msg=%s",
-                    event.involvedObject.kind,
-                    event.involvedObject.name,
-                    event.lastTimestamp
-                    and event.lastTimestamp.astimezone()
-                    or "Date not recorded",
-                    event.message,
-                )
+        is_ready = super().is_ready(obj, cond)
+        if not is_ready:
+            try:
+                log_events(self.client, obj)
+            except Exception as e:
+                log.error("failed to log events: %s", e)
+            
+        return is_ready
 
-        return super().is_ready(obj, cond)
+def log_events(client, obj: HashableResource) -> None:
+    """Log events for the object."""
 
+    object_events = collect_events(client, obj.resource)
+
+    if obj.kind in ["Deployment", "DaemonSet"]:
+        involved_pods = client.list(
+            Pod, namespace=obj.namespace, labels={"app": obj.name}
+        )
+        object_events += [
+            event for pod in involved_pods for event in collect_events(client, pod)
+        ]
+
+    for event in sorted(object_events, key=by_localtime):
+        log.info(
+            "Event %s/%s %s msg=%s",
+            event.involvedObject.kind,
+            event.involvedObject.name,
+            event.lastTimestamp
+            and event.lastTimestamp.astimezone()
+            or "Date not recorded",
+            event.message,
+        )
 
 def by_localtime(event: Event) -> datetime.datetime:
     """Return the last timestamp of the event in local time."""
@@ -189,7 +199,6 @@ def by_localtime(event: Event) -> datetime.datetime:
 def collect_events(client, resource: AnyResource) -> List[Event]:
     """Collect events from the resource."""
     kind: str = resource.kind or type(resource).__name__
-    return list(
         client.list(
             Event,
             namespace=resource.metadata.namespace,
