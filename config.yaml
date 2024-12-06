@@ -43,3 +43,23 @@ options:
     default: True
     description: |
       Whether to enable the Cinder CSI topology awareness
+
+  reclaim-policy:
+    type: string
+    default: "Delete"
+    description: |
+      https://kubernetes.io/docs/concepts/storage/storage-classes/#reclaim-policy
+
+      The reclaim policy for the PVCs created by the CSI driver. This is passed
+      through to the parameters.reclaimPolicy field of the csi-cinder-default
+      StorageClass.
+
+      Potential values are "Delete" or "Retain"
+
+  storage-class-default:
+    type: boolean
+    default: false
+    description: |
+      https://kubernetes.io/docs/tasks/administer-cluster/change-default-storage-class/
+      
+      Whether to set the storage class for the Cinder CSI driver as the cluster default

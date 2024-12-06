@@ -27,4 +27,6 @@ class CharmConfig:
 
     def evaluate(self) -> Optional[str]:
         """Determine if configuration is valid."""
+        if self.config["reclaim-policy"].title() not in ["Delete", "Retain"]:
+            return "reclaim-policy should be either 'Delete' or 'Retain'"
         return None
