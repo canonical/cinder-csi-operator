@@ -13,5 +13,4 @@ resource "juju_application" "cinder_csi" {
   }
 
   config      = var.config
-  constraints = var.constraints
 }

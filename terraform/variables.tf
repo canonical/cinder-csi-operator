@@ -30,12 +30,6 @@ variable "config" {
   default     = {}
 }
 
-variable "constraints" {
-  description = "Juju constraints to apply for this application."
-  type        = string
-  default     = "arch=amd64"
-}
-
 variable "model" {
   description = "Reference to a `juju_model`."
   type        = string
