@@ -48,6 +48,7 @@ def integrator():
         integrator.evaluate_relation.return_value = None
         integrator.cloud_conf_b64 = b"abc"
         integrator.endpoint_tls_ca = b"def"
+        integrator.proxy_config = {}
         yield integrator
 
 

@@ -1,7 +1,7 @@
-lightkube>=0.10.1,<1.0.0
+lightkube
 ops
 ops.manifest>=1.1.0,<2.0.0
 pydantic==1.*
-ops.interface-kube-control @ git+https://github.com/charmed-kubernetes/interface-kube-control.git@edc07bce7ea4c25d472fa4d95834602a7ebce5cd#subdirectory=ops
+ops.interface-kube_control == 0.2.0
 ops.interface-tls-certificates @ git+https://github.com/charmed-kubernetes/interface-tls-certificates.git@4a1081da098154b96337a09c8e9c40acff2d330e#subdirectory=ops
-ops.interface-openstack-integration @ git+https://github.com/charmed-kubernetes/interface-openstack-integration.git@066d177e8ef1acb1e7b1d92832a32c9a1fb41c9e#subdirectory=ops
+ops.interface_openstack_integration @ git+https://github.com/canonical/interface-openstack-integration.git@KU-3229/support-o7k-endpoint-through-proxy#subdirectory=ops

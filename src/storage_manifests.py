@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from lightkube import Client
 from lightkube.codecs import AnyResource, from_dict
-from lightkube.resources.core_v1 import Event, Pod
+from lightkube.models.core_v1 import EnvVar, Event, Pod
 from ops.manifests import (
     Addition,
     ConfigRegistry,
@@ -88,11 +88,11 @@ class CreateStorageClass(Addition):
         return sc
 
 
-class UpdateSecrets(Patch):
-    """Update the secret name in Deployments and DaemonSets."""
+class UpdateCSIDriver(Patch):
+    """Update the Deployments and DaemonSets."""
 
     def __call__(self, obj):
-        """Update the secret volume spec in daemonsets and deployments."""
+        """Update the daemonsets and deployments."""
         if not any(
             [
                 (obj.kind == "DaemonSet" and obj.metadata.name == "csi-cinder-nodeplugin"),
@@ -101,10 +101,30 @@ class UpdateSecrets(Patch):
         ):
             return
 
-        for volume in obj.spec.template.spec.volumes:
+        log.info(f"Setting secret for {obj.kind}/{obj.metadata.name}")
+        self._update_secrets(obj.spec.template.spec.volumes)
+        self._update_pod_spec(obj.spec.template.spec.containers)
+
+    def _update_secrets(self, volumes):
+        """Update the volumes in the deployment or daemonset."""
+        for volume in volumes:
             if volume.secret:
                 volume.secret.secretName = SECRET_NAME
-                log.info(f"Setting secret for {obj.kind}/{obj.metadata.name}")
+
+    def _update_pod_spec(self, containers):
+        for container in containers:
+            if container.name == "csi-provisioner":
+                for i, val in enumerate(container.args):
+                    if "feature-gates" in val.lower():
+                        topology = str(self.manifests.config.get("topology")).lower()
+                        container.args[i] = f"feature-gates=Topology={topology}"
+                        log.info("Configuring cinder topology awareness=%s", topology)
+            if container.name == "cinder-csi-plugin":
+                for env in container.env:
+                    if env.name == "CLUSTER_NAME":
+                        env.value = self.manifests.config.get("cluster-name")
+                for k, v in (self.manifests.config.get("proxy-config") or {}).items():
+                    container.env.append(EnvVar(name=k, value=v))
 
 
 class StorageManifests(Manifests):
@@ -120,8 +140,7 @@ class StorageManifests(Manifests):
                 ManifestLabel(self),
                 ConfigRegistry(self),
                 CreateStorageClass(self, "default"),  # creates csi-cinder-default
-                UpdateSecrets(self),  # update secrets
-                UpdateControllerPlugin(self),
+                UpdateCSIDriver(self),  # update secrets, specs, env-vars
             ],
         )
         self.integrator = integrator
@@ -135,10 +154,12 @@ class StorageManifests(Manifests):
 
         if self.kube_control.is_ready:
             config["image-registry"] = self.kube_control.get_registry_location()
+            config["cluster-name"] = self.kube_control.get_cluster_tag()
 
         if self.integrator.is_ready:
             config["cloud-conf"] = self.integrator.cloud_conf_b64
             config["endpoint-ca-cert"] = self.integrator.endpoint_tls_ca
+            config["proxy-config"] = self.integrator.proxy_config
 
         config.update(**self.charm_config.available_data)
 
@@ -209,20 +230,3 @@ def collect_events(client: Client, resource: AnyResource) -> List[Event]:
             },
         )
     )
-
-
-class UpdateControllerPlugin(Patch):
-    """Update the controller args in Deployments."""
-
-    def __call__(self, obj):
-        """Update the controller args in Deployments."""
-        if not (obj.kind == "Deployment" and obj.metadata.name == "csi-cinder-controllerplugin"):
-            return
-
-        for container in obj.spec.template.spec.containers:
-            if container.name == "csi-provisioner":
-                for i, val in enumerate(container.args):
-                    if "feature-gates" in val.lower():
-                        topology = str(self.manifests.config.get("topology")).lower()
-                        container.args[i] = f"feature-gates=Topology={topology}"
-                        log.info("Configuring cinder topology awareness=%s", topology)
