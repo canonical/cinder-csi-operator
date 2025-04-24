@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from lightkube import Client
 from lightkube.codecs import AnyResource, from_dict
-from lightkube.resources.core_v1 import Event, Pod
+from lightkube.models.core_v1 import EnvVar, Event, Pod
 from ops.manifests import (
     Addition,
     ConfigRegistry,
@@ -25,6 +25,7 @@ log = logging.getLogger(__file__)
 NAMESPACE = "kube-system"
 SECRET_NAME = "csi-cinder-cloud-config"
 STORAGE_CLASS_NAME = "csi-cinder-{type}"
+K8S_DEFAULT_SVC = "kubernetes.default.svc"
 
 
 class CreateSecret(Addition):
@@ -42,7 +43,7 @@ class CreateSecret(Addition):
         secret_config = {}
         for k, new_k in self.CONFIG_TO_SECRET.items():
             if value := self.manifests.config.get(k):
-                secret_config[new_k] = value.decode()
+                secret_config[new_k] = value
 
         log.info("Encode secret data for storage.")
         return from_dict(
@@ -88,11 +89,41 @@ class CreateStorageClass(Addition):
         return sc
 
 
-class UpdateSecrets(Patch):
-    """Update the secret name in Deployments and DaemonSets."""
+def _proxy_config_to_env_vars(proxy_config: Dict[str, str]) -> List[EnvVar]:
+    """Convert proxy config to env vars.
+
+    If the proxy config is empty, return an empty list.
+    If the proxy config is not empty, return a list of EnvVar objects
+
+    Args:
+        proxy_config: A dictionary of proxy config values.
+
+    Returns:
+        A list of EnvVar objects for the proxy config.
+    """
+    if not proxy_config:
+        return []
+    # Confirm all keys are upper case, all values are strings
+    as_upper = {k.upper(): (v or "") for k, v in proxy_config.items()}
+    # Confirm no empty values for each of the required fields
+    required_fields = {"HTTP_PROXY": "", "HTTPS_PROXY": "", "NO_PROXY": ""}
+    all_fields = {**required_fields, **as_upper}
+    env_vars = []
+    for key, value in all_fields.items():
+        # Only add env vars that are not empty
+        if key == "NO_PROXY" and K8S_DEFAULT_SVC not in value:
+            # Add kubernetes.default.svc to no_proxy
+            value = ",".join(filter(None, [K8S_DEFAULT_SVC, value]))
+        if key in required_fields:
+            env_vars.append(EnvVar(name=key, value=value))
+    return env_vars
+
+
+class UpdateCSIDriver(Patch):
+    """Update the Deployments and DaemonSets."""
 
     def __call__(self, obj):
-        """Update the secret volume spec in daemonsets and deployments."""
+        """Update the daemonsets and deployments."""
         if not any(
             [
                 (obj.kind == "DaemonSet" and obj.metadata.name == "csi-cinder-nodeplugin"),
@@ -101,10 +132,31 @@ class UpdateSecrets(Patch):
         ):
             return
 
-        for volume in obj.spec.template.spec.volumes:
+        log.info(f"Setting secret for {obj.kind}/{obj.metadata.name}")
+        self._update_secrets(obj.spec.template.spec.volumes)
+        self._update_pod_spec(obj.spec.template.spec.containers)
+
+    def _update_secrets(self, volumes):
+        """Update the volumes in the deployment or daemonset."""
+        for volume in volumes:
             if volume.secret:
                 volume.secret.secretName = SECRET_NAME
-                log.info(f"Setting secret for {obj.kind}/{obj.metadata.name}")
+
+    def _update_pod_spec(self, containers):
+        for container in containers:
+            if container.name == "csi-provisioner":
+                for i, val in enumerate(container.args):
+                    if "feature-gates" in val.lower():
+                        topology = str(self.manifests.config.get("topology")).lower()
+                        container.args[i] = f"feature-gates=Topology={topology}"
+                        log.info("Configuring cinder topology awareness=%s", topology)
+            if container.name == "cinder-csi-plugin":
+                for env in container.env:
+                    if env.name == "CLUSTER_NAME":
+                        env.value = self.manifests.config.get("cluster-name")
+
+                proxy_config = self.manifests.config.get("proxy-config") or {}
+                container.env.extend(_proxy_config_to_env_vars(proxy_config))
 
 
 class StorageManifests(Manifests):
@@ -120,8 +172,7 @@ class StorageManifests(Manifests):
                 ManifestLabel(self),
                 ConfigRegistry(self),
                 CreateStorageClass(self, "default"),  # creates csi-cinder-default
-                UpdateSecrets(self),  # update secrets
-                UpdateControllerPlugin(self),
+                UpdateCSIDriver(self),  # update secrets, specs, env-vars
             ],
         )
         self.integrator = integrator
@@ -131,16 +182,14 @@ class StorageManifests(Manifests):
     @property
     def config(self) -> Dict:
         """Returns current config available from charm config and joined relations."""
-        config: Dict = {}
-
-        if self.kube_control.is_ready:
-            config["image-registry"] = self.kube_control.get_registry_location()
-
-        if self.integrator.is_ready:
-            config["cloud-conf"] = self.integrator.cloud_conf_b64
-            config["endpoint-ca-cert"] = self.integrator.endpoint_tls_ca
-
-        config.update(**self.charm_config.available_data)
+        config = {
+            "image-registry": self.kube_control.get_registry_location(),
+            "cluster-name": self.kube_control.get_cluster_tag(),
+            "cloud-conf": (val := self.integrator.cloud_conf_b64) and val.decode(),
+            "endpoint-ca-cert": (val := self.integrator.endpoint_tls_ca) and val.decode(),
+            "proxy-config": self.integrator.proxy_config,
+            **self.charm_config.available_data,
+        }
 
         for key, value in dict(**config).items():
             if value == "" or value is None:
@@ -209,20 +258,3 @@ def collect_events(client: Client, resource: AnyResource) -> List[Event]:
             },
         )
     )
-
-
-class UpdateControllerPlugin(Patch):
-    """Update the controller args in Deployments."""
-
-    def __call__(self, obj):
-        """Update the controller args in Deployments."""
-        if not (obj.kind == "Deployment" and obj.metadata.name == "csi-cinder-controllerplugin"):
-            return
-
-        for container in obj.spec.template.spec.containers:
-            if container.name == "csi-provisioner":
-                for i, val in enumerate(container.args):
-                    if "feature-gates" in val.lower():
-                        topology = str(self.manifests.config.get("topology")).lower()
-                        container.args[i] = f"feature-gates=Topology={topology}"
-                        log.info("Configuring cinder topology awareness=%s", topology)
