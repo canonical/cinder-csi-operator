@@ -25,7 +25,7 @@ log = logging.getLogger(__file__)
 NAMESPACE = "kube-system"
 SECRET_NAME = "csi-cinder-cloud-config"
 STORAGE_CLASS_NAME = "csi-cinder-{type}"
-K8S_DEFAULT_SVC = "kubernetes.default.svc"
+K8S_DEFAULT_NO_PROXY = ["127.0.0.1", "localhost", "::1", "svc", "svc.cluster", "svc.cluster.local"]
 
 
 class CreateSecret(Addition):
@@ -103,19 +103,17 @@ def _proxy_config_to_env_vars(proxy_config: Dict[str, str]) -> List[EnvVar]:
     """
     if not proxy_config:
         return []
-    # Confirm all keys are upper case, all values are strings
-    as_upper = {k.upper(): (v or "") for k, v in proxy_config.items()}
-    # Confirm no empty values for each of the required fields
-    required_fields = {"HTTP_PROXY": "", "HTTPS_PROXY": "", "NO_PROXY": ""}
-    all_fields = {**required_fields, **as_upper}
+    fields = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]
+    settings = {k: (proxy_config.get(k) or "") for k in fields}
+    settings.update({k: (proxy_config.get(k) or "") for k in map(str.lower, fields)})
     env_vars = []
-    for key, value in all_fields.items():
+    for key, value in settings.items():
         # Only add env vars that are not empty
-        if key == "NO_PROXY" and K8S_DEFAULT_SVC not in value:
-            # Add kubernetes.default.svc to no_proxy
-            value = ",".join(filter(None, [K8S_DEFAULT_SVC, value]))
-        if key in required_fields:
-            env_vars.append(EnvVar(name=key, value=value))
+        if key.upper() == "NO_PROXY":
+            # Ensure no_proxy_extras are included
+            uniq_seen = dict.fromkeys(K8S_DEFAULT_NO_PROXY + value.split(","))
+            value = ",".join(filter(None, uniq_seen))
+        env_vars.append(EnvVar(name=key, value=value))
     return env_vars
 
 
