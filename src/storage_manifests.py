@@ -8,9 +8,10 @@ import pickle
 from hashlib import md5
 from typing import Dict, List, Optional
 
+import jmodelproxylib
 from lightkube import Client
 from lightkube.codecs import AnyResource, from_dict
-from lightkube.models.core_v1 import EnvVar, Event, Pod
+from lightkube.models.core_v1 import Event, Pod
 from ops.manifests import (
     Addition,
     ConfigRegistry,
@@ -89,34 +90,6 @@ class CreateStorageClass(Addition):
         return sc
 
 
-def _proxy_config_to_env_vars(proxy_config: Dict[str, str]) -> List[EnvVar]:
-    """Convert proxy config to env vars.
-
-    If the proxy config is empty, return an empty list.
-    If the proxy config is not empty, return a list of EnvVar objects
-
-    Args:
-        proxy_config: A dictionary of proxy config values.
-
-    Returns:
-        A list of EnvVar objects for the proxy config.
-    """
-    if not proxy_config:
-        return []
-    fields = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]
-    settings = {k: (proxy_config.get(k) or "") for k in fields}
-    settings.update({k: (proxy_config.get(k) or "") for k in map(str.lower, fields)})
-    env_vars = []
-    for key, value in settings.items():
-        # Only add env vars that are not empty
-        if key.upper() == "NO_PROXY":
-            # Ensure no_proxy_extras are included
-            uniq_seen = dict.fromkeys(K8S_DEFAULT_NO_PROXY + value.split(","))
-            value = ",".join(filter(None, uniq_seen))
-        env_vars.append(EnvVar(name=key, value=value))
-    return env_vars
-
-
 class UpdateCSIDriver(Patch):
     """Update the Deployments and DaemonSets."""
 
@@ -153,8 +126,9 @@ class UpdateCSIDriver(Patch):
                     if env.name == "CLUSTER_NAME":
                         env.value = self.manifests.config.get("cluster-name")
 
-                proxy_config = self.manifests.config.get("proxy-config") or {}
-                container.env.extend(_proxy_config_to_env_vars(proxy_config))
+                enabled = self.manifests.config.get("juju-model-proxy-enable")
+                env = jmodelproxylib.environ(enabled=enabled, add_no_proxies=K8S_DEFAULT_NO_PROXY)
+                container.env.extend(jmodelproxylib.container_vars(env))
 
 
 class StorageManifests(Manifests):
@@ -185,7 +159,6 @@ class StorageManifests(Manifests):
             "cluster-name": self.kube_control.get_cluster_tag(),
             "cloud-conf": (val := self.integrator.cloud_conf_b64) and val.decode(),
             "endpoint-ca-cert": (val := self.integrator.endpoint_tls_ca) and val.decode(),
-            "proxy-config": self.integrator.proxy_config,
             **self.charm_config.available_data,
         }
 
