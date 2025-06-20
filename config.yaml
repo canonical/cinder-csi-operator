@@ -1,4 +1,11 @@
 options:
+  availability-zone:
+    type: string
+    default: ""
+    description: |
+      Availability zone to use with Cinder CSI. This is passed through to the
+      parameters.availability field of the csi-cinder-default StorageClass.
+
   image-registry:
     type: string
     description: |
@@ -13,36 +20,13 @@ options:
         juju config cinder-csi image-registry='rocks.canonical.com:443/cdk'
         juju config cinder-csi --reset image-registry
 
-  storage-release:
-    type: string
-    description: |
-      Specify the version of storage-release as defined by the `release`
-      tags of https://github.com/kubernetes/cloud-provider-openstack
-
-      example)
-        juju config cinder-csi storage-release='v1.7.3'
-      
-      A list of supported versions is available through the action:
-        juju run-action cinder-csi/leader list-releases --wait
-      
-      To reset by to the latest supported by the charm use:
-        juju config cinder-csi --reset storage-release
-      
-      The current release deployed is available by viewing
-        juju status cinder-csi
-
-  availability-zone:
-    type: string
-    default: ""
-    description: |
-      Availability zone to use with Cinder CSI. This is passed through to the
-      parameters.availability field of the csi-cinder-default StorageClass.
-
-  topology:
+  juju-model-proxy-enable:
     type: boolean
-    default: True
     description: |
-      Whether to enable the Cinder CSI topology awareness
+      Whether the applications managed by this charm should be
+      proxied using juju's model-config juju-*-proxy settings.
+      (See https://documentation.ubuntu.com/juju/latest/reference/juju-cli/list-of-juju-cli-commands/model-config/).
+    default: false
 
   reclaim-policy:
     type: string
@@ -61,5 +45,28 @@ options:
     default: false
     description: |
       https://kubernetes.io/docs/tasks/administer-cluster/change-default-storage-class/
-      
+
       Whether to set the storage class for the Cinder CSI driver as the cluster default
+  storage-release:
+    type: string
+    description: |
+      Specify the version of storage-release as defined by the `release`
+      tags of https://github.com/kubernetes/cloud-provider-openstack
+
+      example)
+        juju config cinder-csi storage-release='v1.7.3'
+
+      A list of supported versions is available through the action:
+        juju run-action cinder-csi/leader list-releases --wait
+
+      To reset by to the latest supported by the charm use:
+        juju config cinder-csi --reset storage-release
+
+      The current release deployed is available by viewing
+        juju status cinder-csi
+
+  topology:
+    type: boolean
+    default: True
+    description: |
+      Whether to enable the Cinder CSI topology awareness
