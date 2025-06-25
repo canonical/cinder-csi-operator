@@ -26,7 +26,16 @@ log = logging.getLogger(__file__)
 NAMESPACE = "kube-system"
 SECRET_NAME = "csi-cinder-cloud-config"
 STORAGE_CLASS_NAME = "csi-cinder-{type}"
-K8S_DEFAULT_NO_PROXY = ["127.0.0.1", "localhost", "::1", "svc", "svc.cluster", "svc.cluster.local"]
+OPENSTACK_METADATA_SERVER = "169.254.169.254"
+K8S_DEFAULT_NO_PROXY = [
+    "127.0.0.1",
+    OPENSTACK_METADATA_SERVER, # this should always skip the proxy
+    "localhost",
+    "::1",
+    "svc",
+    "svc.cluster",
+    "svc.cluster.local",
+]
 
 
 class CreateSecret(Addition):
