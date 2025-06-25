@@ -20,7 +20,7 @@ options:
         juju config cinder-csi image-registry='rocks.canonical.com:443/cdk'
         juju config cinder-csi --reset image-registry
 
-  juju-model-proxy-enable:
+  web-proxy-enable:
     type: boolean
     description: |
       Whether the applications managed by this charm should be

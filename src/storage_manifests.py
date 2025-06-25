@@ -8,7 +8,7 @@ import pickle
 from hashlib import md5
 from typing import Dict, List, Optional
 
-import jmodelproxylib
+import charms.proxylib
 from lightkube import Client
 from lightkube.codecs import AnyResource, from_dict
 from lightkube.models.core_v1 import Event, Pod
@@ -29,7 +29,7 @@ STORAGE_CLASS_NAME = "csi-cinder-{type}"
 OPENSTACK_METADATA_SERVER = "169.254.169.254"
 K8S_DEFAULT_NO_PROXY = [
     "127.0.0.1",
-    OPENSTACK_METADATA_SERVER, # this should always skip the proxy
+    OPENSTACK_METADATA_SERVER,  # this should always skip the proxy
     "localhost",
     "::1",
     "svc",
@@ -135,9 +135,9 @@ class UpdateCSIDriver(Patch):
                     if env.name == "CLUSTER_NAME":
                         env.value = self.manifests.config.get("cluster-name")
 
-                enabled = self.manifests.config.get("juju-model-proxy-enable")
-                env = jmodelproxylib.environ(enabled=enabled, add_no_proxies=K8S_DEFAULT_NO_PROXY)
-                container.env.extend(jmodelproxylib.container_vars(env))
+                enabled = self.manifests.config.get("web-proxy-enable")
+                env = charms.proxylib.environ(enabled=enabled, add_no_proxies=K8S_DEFAULT_NO_PROXY)
+                container.env.extend(charms.proxylib.container_vars(env))
 
 
 class StorageManifests(Manifests):

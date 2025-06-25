@@ -5,4 +5,4 @@ pydantic==1.*
 ops.interface-kube_control==0.2.0
 ops.interface-tls-certificates @ git+https://github.com/charmed-kubernetes/interface-tls-certificates.git@4a1081da098154b96337a09c8e9c40acff2d330e#subdirectory=ops
 ops.interface_openstack_integration @ git+https://github.com/charmed-kubernetes/interface-openstack-integration.git@cf4383999b0920b226104299f4defb3576680d72#subdirectory=ops
-jmodelproxylib @ git+https://github.com/addyess/jmodelproxylib@main
+charms.proxylib == 0.0.0
