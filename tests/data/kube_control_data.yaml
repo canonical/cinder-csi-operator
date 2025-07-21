@@ -15,7 +15,7 @@ creds: |-
     "cinder-csi/0": {
       "client_token": "admin::reacted",
       "kubelet_token": "cinder-csi/0::reacted",
-      "proxy_token": "kube-proxy::reacted", 
+      "proxy_token": "kube-proxy::reacted",
       "scope": "kubernetes-worker/0"
     }
   }
@@ -30,4 +30,4 @@ private-address: 10.246.154.7
 registry-location: rocks.canonical.com:443/cdk
 sdn-ip: 10.152.183.20
 taints: '["node-role.kubernetes.io/control-plane=true:NoSchedule"]'
-labels: '["node-role.kubernetes.io/control-plane=true"]'
+labels: '["node-role.kubernetes.io/control-plane="]'

@@ -6,7 +6,7 @@ import datetime
 import logging
 import pickle
 from hashlib import md5
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 import charms.proxylib
 from lightkube import Client
@@ -113,8 +113,19 @@ class UpdateCSIDriver(Patch):
             return
 
         log.info(f"Setting secret for {obj.kind}/{obj.metadata.name}")
+        self._update_node_selector(obj)
         self._update_secrets(obj.spec.template.spec.volumes)
         self._update_pod_spec(obj.spec.template.spec.containers)
+
+    def _update_node_selector(self, obj):
+        """Update the node selector for the controllerplugin deployment."""
+        if obj.kind != "Deployment" or obj.metadata.name != "csi-cinder-controllerplugin":
+            return
+
+        node_selector = cast(dict, self.manifests.config["control-node-selector"])
+        node_selector_text = " ".join('{0}: "{1}"'.format(*t) for t in node_selector.items())
+        log.info(f"Applying Control Node Selector as {node_selector_text}")
+        obj.spec.template.spec.nodeSelector = node_selector
 
     def _update_secrets(self, volumes):
         """Update the volumes in the deployment or daemonset."""
@@ -167,6 +178,10 @@ class StorageManifests(Manifests):
             "image-registry": self.kube_control.get_registry_location(),
             "cluster-name": self.kube_control.get_cluster_tag(),
             "cloud-conf": (val := self.integrator.cloud_conf_b64) and val.decode(),
+            "control-node-selector": {
+                label.key: label.value for label in self.kube_control.get_controller_labels()
+            }
+            or {"juju-application": self.kube_control.relation.app.name},
             "endpoint-ca-cert": (val := self.integrator.endpoint_tls_ca) and val.decode(),
             **self.charm_config.available_data,
         }

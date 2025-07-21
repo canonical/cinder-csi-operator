@@ -161,6 +161,7 @@ def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog):
     storage_messages = {r.message for r in caplog.records if "storage" in r.filename}
 
     assert storage_messages == {
+        'Applying Control Node Selector as node-role.kubernetes.io/control-plane: ""',
         "Encode secret data for storage.",
         "Creating storage class csi-cinder-default",
         "Setting secret for DaemonSet/csi-cinder-nodeplugin",
