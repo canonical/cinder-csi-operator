@@ -176,7 +176,8 @@ class StorageManifests(Manifests):
     def config(self) -> Dict:
         """Returns current config available from charm config and joined relations."""
         if labels := self.kube_control.get_controller_labels():
-            controller_labels = {label.key: label.value for label in labels}
+            stable_sort = sorted(labels, key=lambda val: val.key)
+            controller_labels = {label.key: label.value for label in stable_sort}
         else:
             # the controller labels are sourced from juju config on either
             # the k8s or kubernetes-control-plane charm.
