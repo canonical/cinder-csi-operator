@@ -12,6 +12,7 @@ import charms.proxylib
 from lightkube import Client
 from lightkube.codecs import AnyResource, from_dict
 from lightkube.models.core_v1 import Event, Pod
+from ops.interface_kube_control import KubeControlRequirer
 from ops.manifests import (
     Addition,
     ConfigRegistry,
@@ -154,7 +155,7 @@ class UpdateCSIDriver(Patch):
 class StorageManifests(Manifests):
     """Deployment Specific details for the cinder-csi-driver."""
 
-    def __init__(self, charm, charm_config, kube_control, integrator):
+    def __init__(self, charm, charm_config, kube_control: KubeControlRequirer, integrator):
         super().__init__(
             "cinder-csi-driver",
             charm.model,
@@ -174,14 +175,22 @@ class StorageManifests(Manifests):
     @property
     def config(self) -> Dict:
         """Returns current config available from charm config and joined relations."""
+        if labels := self.kube_control.get_controller_labels():
+            controller_labels = {label.key: label.value for label in labels}
+        else:
+            # the controller labels are sourced from juju config on either
+            # the k8s or kubernetes-control-plane charm.
+            # These could represent empty labels (as in the default with k8s)
+            # and can also just be empty if the user judges to remove them
+            # in order to make sure the cinder controllers land on controller
+            # nodes we can just fallback to this well-known label
+            log.warning("No controller labels found, using fallback")
+            controller_labels = {"juju-application": self.kube_control.relation.app.name}
         config = {
             "image-registry": self.kube_control.get_registry_location(),
             "cluster-name": self.kube_control.get_cluster_tag(),
             "cloud-conf": (val := self.integrator.cloud_conf_b64) and val.decode(),
-            "control-node-selector": {
-                label.key: label.value for label in self.kube_control.get_controller_labels()
-            }
-            or {"juju-application": self.kube_control.relation.app.name},
+            "control-node-selector": controller_labels,
             "endpoint-ca-cert": (val := self.integrator.endpoint_tls_ca) and val.decode(),
             **self.charm_config.available_data,
         }
