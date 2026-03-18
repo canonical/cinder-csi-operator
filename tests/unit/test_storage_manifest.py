@@ -7,7 +7,7 @@ import os
 import unittest.mock as mock
 
 import pytest
-from lightkube.models.core_v1 import Container, EnvVar, Volume
+from lightkube.models.core_v1 import Container, EnvVar, Taint, Toleration, Volume
 from lightkube.resources.apps_v1 import DaemonSet, Deployment
 
 import storage_manifests
@@ -131,3 +131,101 @@ def test_patch_csi_driver(resource, name, storage, respect_proxy, no_proxy):
         assert "http_proxy" not in keys
         assert "https_proxy" not in keys
         assert "no_proxy" not in keys
+
+
+@pytest.mark.parametrize(
+    "taints,expected",
+    [
+        pytest.param(
+            [],
+            [Taint(key="node-role.kubernetes.io/control-plane", effect="NoSchedule")],
+            id="default-fallback-when-empty",
+        ),
+        pytest.param(
+            [Taint(key="custom-taint", value="custom-value", effect="NoSchedule")],
+            [Taint(key="custom-taint", value="custom-value", effect="NoSchedule")],
+            id="uses-kube-control-taints",
+        ),
+    ],
+)
+def test_config_control_node_taints(taints, expected, kube_control, storage):
+    """Test that control-node-taints uses kube_control or falls back to a default."""
+    kube_control.get_controller_taints.return_value = taints
+    assert storage.config["control-node-taints"] == expected
+
+
+@pytest.mark.parametrize(
+    "taints,expected_tolerations",
+    [
+        pytest.param(
+            [Taint(key="node-role.kubernetes.io/control-plane", effect="NoSchedule")],
+            [
+                Toleration(
+                    key="node-role.kubernetes.io/control-plane",
+                    effect="NoSchedule",
+                    operator="Exists",
+                )
+            ],
+            id="taint-without-value-uses-exists-operator",
+        ),
+        pytest.param(
+            [Taint(key="my-key", value="my-value", effect="NoSchedule")],
+            [Toleration(key="my-key", value="my-value", effect="NoSchedule", operator="Equal")],
+            id="taint-with-value-uses-equal-operator",
+        ),
+        pytest.param(
+            [
+                Taint(key="key1", effect="NoSchedule"),
+                Taint(key="key2", value="val2", effect="NoExecute"),
+            ],
+            [
+                Toleration(key="key1", effect="NoSchedule", operator="Exists"),
+                Toleration(key="key2", value="val2", effect="NoExecute", operator="Equal"),
+            ],
+            id="multiple-taints-to-tolerations",
+        ),
+    ],
+)
+def test_tolerations_set_on_controller_deployment(
+    taints, expected_tolerations, kube_control, storage
+):
+    """Test that tolerations are applied to the csi-cinder-controllerplugin Deployment."""
+    kube_control.get_controller_taints.return_value = taints
+
+    update_rsc = storage.manipulations[-1]
+    assert isinstance(update_rsc, storage_manifests.UpdateCSIDriver)
+
+    rsc = mock.MagicMock(spec=Deployment)
+    rsc.kind = "Deployment"
+    rsc.metadata.name = "csi-cinder-controllerplugin"
+    rsc.spec.template.spec.volumes = []
+    container = mock.MagicMock(spec=Container)
+    container.name = "cinder-csi-plugin"
+    container.env = []
+    rsc.spec.template.spec.containers = [container]
+
+    update_rsc(rsc)
+    assert rsc.spec.template.spec.tolerations == expected_tolerations
+
+
+def test_daemonset_tolerations_not_modified(kube_control, storage):
+    """Test that tolerations are not set on the csi-cinder-nodeplugin DaemonSet."""
+    kube_control.get_controller_taints.return_value = [
+        Taint(key="node-role.kubernetes.io/control-plane", effect="NoSchedule")
+    ]
+
+    update_rsc = storage.manipulations[-1]
+    assert isinstance(update_rsc, storage_manifests.UpdateCSIDriver)
+
+    rsc = mock.MagicMock(spec=DaemonSet)
+    rsc.kind = "DaemonSet"
+    rsc.metadata.name = "csi-cinder-nodeplugin"
+    rsc.spec.template.spec.volumes = []
+    container = mock.MagicMock(spec=Container)
+    container.name = "cinder-csi-plugin"
+    container.env = []
+    rsc.spec.template.spec.containers = [container]
+
+    original_tolerations = rsc.spec.template.spec.tolerations
+    update_rsc(rsc)
+    assert rsc.spec.template.spec.tolerations is original_tolerations
