@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, cast
 import charms.proxylib
 from lightkube import Client
 from lightkube.codecs import AnyResource, from_dict
-from lightkube.models.core_v1 import Event, Pod, Toleration
+from lightkube.models.core_v1 import Event, Pod, Taint, Toleration
 from ops.interface_kube_control import KubeControlRequirer
 from ops.manifests import (
     Addition,
@@ -128,17 +128,15 @@ class UpdateCSIDriver(Patch):
         log.info(f"Applying Control Node Selector as {node_selector_text}")
         obj.spec.template.spec.nodeSelector = node_selector
 
-        current_tolerations = obj.spec.template.spec.tolerations or []
-        missing_tolerations = [
+        obj.spec.template.spec.tolerations = [
             Toleration(
+                effect=taint.effect,
                 key=taint.key,
                 value=taint.value,
-                effect=taint.effect,
+                operator="Equal" if taint.value else "Exists",
             )
             for taint in self.manifests.config.get("control-node-taints", [])
-            if taint.key not in {toleration.key for toleration in current_tolerations}
         ]
-        obj.spec.template.spec.tolerations = current_tolerations + missing_tolerations
         log.info("Setting Control Node tolerations")
 
     def _update_secrets(self, volumes):
@@ -206,7 +204,7 @@ class StorageManifests(Manifests):
             "cloud-conf": (val := self.integrator.cloud_conf_b64) and val.decode(),
             "control-node-selector": controller_labels,
             "control-node-taints": self.kube_control.get_controller_taints()
-            or [Toleration("NoSchedule", "node-role.kubernetes.io/control-plane")],  # by default
+            or [Taint("NoSchedule", "node-role.kubernetes.io/control-plane")],  # by default
             "endpoint-ca-cert": (val := self.integrator.endpoint_tls_ca) and val.decode(),
             **self.charm_config.available_data,
         }
