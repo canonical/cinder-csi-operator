@@ -204,7 +204,7 @@ class StorageManifests(Manifests):
             "cloud-conf": (val := self.integrator.cloud_conf_b64) and val.decode(),
             "control-node-selector": controller_labels,
             "control-node-taints": self.kube_control.get_controller_taints()
-            or [Taint("NoSchedule", "node-role.kubernetes.io/control-plane")],  # by default
+            or [Taint(key="node-role.kubernetes.io/control-plane", effect="NoSchedule")],  # by default
             "endpoint-ca-cert": (val := self.integrator.endpoint_tls_ca) and val.decode(),
             **self.charm_config.available_data,
         }
