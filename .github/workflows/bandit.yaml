@@ -19,8 +19,6 @@ jobs:
     bandit:
         name: Bandit scan
         runs-on: ubuntu-latest
-        permissions:
-            security-events: write
         steps:
             - name: Checkout repository
               uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -34,14 +32,4 @@ jobs:
               run: pip install --require-hashes -r ci/requirements-bandit.txt
 
             - name: Run Bandit scan
-              run: |
-                  bandit -r . -c pyproject.toml -lll \
-                    --format sarif \
-                    --output bandit-results.sarif \
-                    || true
-
-            - name: Upload SARIF results
-              uses: github/codeql-action/upload-sarif@5c8a8a642e79153f5d047b10ec1cba1d1cc65699 # v3
-              if: always()
-              with:
-                  sarif_file: bandit-results.sarif
+              run: bandit -r . -c pyproject.toml -lll
