@@ -1,6 +1,8 @@
 name: Bandit Security Scan
 
 on:
+    schedule:
+        - cron: "0 9 * * 1" # Weekly on Monday at 09:00 UTC
     push:
         paths-ignore:
             - "docs/**"
