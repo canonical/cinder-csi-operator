@@ -56,7 +56,7 @@ def kube_control():
     """Return the kube control mock."""
     kube_control = mock.MagicMock(spec=KubeControlRequirer)
     kube_control.evaluate_relation.return_value = None
-    kube_control.get_registry_location.return_value = "rocks.canonical.com/cdk"
+    kube_control.get_registry_location.return_value = "ghcr.io/canonical/cdk"
     kube_control.kubeconfig = b"abc"
     kube_control.get_cluster_tag.return_value = CLUSTER_NAME
     return kube_control

@@ -14,7 +14,7 @@ tox -e update -- --registry ${upload-registry} ${namespacing-path} ${user} ~/.up
 This will overwrite the existing manifests for the supported components
 This will also synchronize the images to a provided oci-registry
 
-example) uploading to rocks
+example) uploading to GHCR
     ```
-    --registry upload.rocks.canonical.com:5000 staging/cdk admin ~/.upload-password
+    --registry ghcr.io canonical/cdk <user> ~/.token
     ```

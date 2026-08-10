@@ -17,7 +17,7 @@ options:
       If unset, the manifests will use the image registry from the kube-control relation
 
       example)
-        juju config cinder-csi image-registry='rocks.canonical.com:443/cdk'
+        juju config cinder-csi image-registry='ghcr.io/canonical/cdk'
         juju config cinder-csi --reset image-registry
 
   web-proxy-enable:
