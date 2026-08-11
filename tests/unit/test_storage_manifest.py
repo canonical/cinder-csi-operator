@@ -3,11 +3,19 @@
 #
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
+import json
 import os
 import unittest.mock as mock
 
 import pytest
-from lightkube.models.core_v1 import Container, EnvVar, Taint, Toleration, Volume
+from lightkube.models.core_v1 import (
+    Container,
+    EnvVar,
+    HostPathVolumeSource,
+    Taint,
+    Toleration,
+    Volume,
+)
 from lightkube.resources.apps_v1 import DaemonSet, Deployment
 
 import storage_manifests
@@ -229,3 +237,133 @@ def test_daemonset_tolerations_not_modified(kube_control, storage):
     original_tolerations = rsc.spec.template.spec.tolerations
     update_rsc(rsc)
     assert rsc.spec.template.spec.tolerations is original_tolerations
+
+
+def test_kubelet_dir_override_updates_nodeplugin_daemonset(storage, charm_config):
+    """Ensure kubelet-dir overrides rewrite nodeplugin paths consistently."""
+    charm_config.available_data["kubelet-dir"] = "/custom/kubelet"
+
+    update_rsc = storage.manipulations[-1]
+    assert isinstance(update_rsc, storage_manifests.UpdateCSIDriver)
+
+    socket_volume = mock.MagicMock(spec=Volume)
+    socket_volume.name = "socket-dir"
+    socket_volume.hostPath = HostPathVolumeSource(
+        path="/var/lib/kubelet/plugins/cinder.csi.openstack.org"
+    )
+
+    registration_volume = mock.MagicMock(spec=Volume)
+    registration_volume.name = "registration-dir"
+    registration_volume.hostPath = HostPathVolumeSource(path="/var/lib/kubelet/plugins_registry/")
+
+    kubelet_volume = mock.MagicMock(spec=Volume)
+    kubelet_volume.name = "kubelet-dir"
+    kubelet_volume.hostPath = HostPathVolumeSource(path=storage_manifests.DEFAULT_KUBELET_DIR)
+
+    registrar = mock.MagicMock(spec=Container)
+    registrar.name = "node-driver-registrar"
+    registrar.args = [
+        "--kubelet-registration-path=/var/lib/kubelet/plugins/cinder.csi.openstack.org/csi.sock"
+    ]
+    registrar.env = [
+        EnvVar(
+            name="DRIVER_REG_SOCK_PATH",
+            value="/var/lib/kubelet/plugins/cinder.csi.openstack.org/csi.sock",
+        )
+    ]
+
+    mount = mock.MagicMock()
+    mount.name = "kubelet-dir"
+    mount.mountPath = storage_manifests.DEFAULT_KUBELET_DIR
+
+    plugin = mock.MagicMock(spec=Container)
+    plugin.name = "cinder-csi-plugin"
+    plugin.env = []
+    plugin.volumeMounts = [mount]
+
+    rsc = mock.MagicMock(spec=DaemonSet)
+    rsc.kind = "DaemonSet"
+    rsc.metadata.name = "csi-cinder-nodeplugin"
+    rsc.spec.template.spec.volumes = [socket_volume, registration_volume, kubelet_volume]
+    rsc.spec.template.spec.containers = [registrar, plugin]
+
+    update_rsc(rsc)
+
+    assert socket_volume.hostPath.path == "/custom/kubelet/plugins/cinder.csi.openstack.org"
+    assert registration_volume.hostPath.path == "/custom/kubelet/plugins_registry/"
+    assert kubelet_volume.hostPath.path == "/custom/kubelet"
+    assert registrar.args == [
+        "--kubelet-registration-path=/custom/kubelet/plugins/cinder.csi.openstack.org/csi.sock"
+    ]
+    assert registrar.env == [
+        EnvVar(
+            name="DRIVER_REG_SOCK_PATH",
+            value="/custom/kubelet/plugins/cinder.csi.openstack.org/csi.sock",
+        )
+    ]
+    assert mount.mountPath == "/custom/kubelet"
+
+
+def test_config_fallback_controller_labels_without_relation(kube_control, storage):
+    """Ensure config fallback does not fail when kube-control relation is missing."""
+    kube_control.get_controller_labels.return_value = []
+    kube_control.relation = None
+
+    assert storage.config["control-node-selector"] == {}
+
+
+def test_evaluate_rejects_unsupported_storage_release(storage, charm_config):
+    """Ensure evaluate blocks when configured storage-release is not present locally."""
+    charm_config.available_data["storage-release"] = "v999.999.999"
+
+    msg = storage.evaluate()
+
+    assert msg is not None
+    assert "storage-release 'v999.999.999' is not supported" in msg
+
+
+def test_evaluate_accepts_supported_storage_release(storage, charm_config):
+    """Ensure evaluate passes when configured storage-release exists locally."""
+    charm_config.available_data["storage-release"] = storage.releases[0]
+
+    assert storage.evaluate() is None
+
+
+def test_custom_storage_classes_are_passed_through(storage, charm_config):
+    """Ensure custom-storage-classes entries are applied exactly as provided."""
+    custom_classes = [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "StorageClass",
+            "metadata": {"name": "csi-cinder-topology-delete"},
+            "provisioner": "cinder.csi.openstack.org",
+            "reclaimPolicy": "Delete",
+            "allowVolumeExpansion": True,
+            "volumeBindingMode": "WaitForFirstConsumer",
+            "allowedTopologies": [
+                {
+                    "matchLabelExpressions": [
+                        {
+                            "key": "topology.cinder.csi.openstack.org/zone",
+                            "values": ["AG1", "AG2", "AG3"],
+                        }
+                    ]
+                }
+            ],
+        }
+    ]
+    charm_config.available_data["custom-storage-classes"] = json.dumps(custom_classes)
+
+    add_custom = next(
+        m
+        for m in storage.manipulations
+        if isinstance(m, storage_manifests.CreateCustomStorageClasses)
+    )
+
+    with mock.patch(
+        "storage_manifests.from_dict", side_effect=lambda val: val
+    ) as mocked_from_dict:
+        resources = add_custom()
+
+    assert resources == custom_classes
+    mocked_from_dict.assert_called_once_with(custom_classes[0])

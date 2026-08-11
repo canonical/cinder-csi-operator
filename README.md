@@ -9,6 +9,17 @@ This subordinate charm manages the cinder-csi-driver components a Kubernetes clo
 The charm requires openstack credentials and connection information, which
 can be provided via the `openstack-integration` relation to the [Openstack Integrator charm](https://charmhub.io/openstack-integrator).
 
+### Release Selection
+
+When setting `storage-release`, manifests for that version must already be
+present in the charm source tree under `upstream/cloud_storage/manifests`.
+
+You can verify supported versions via:
+
+```bash
+juju run cinder-csi/leader list-versions --wait
+```
+
 ## Deployment
 
 ### The full process

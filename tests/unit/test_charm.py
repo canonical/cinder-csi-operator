@@ -130,6 +130,7 @@ def test_waits_for_certificates(harness):
 @mock.patch("ops.interface_kube_control.KubeControlRequirer.create_kubeconfig")
 @pytest.mark.usefixtures("integrator", "certificates")
 def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog):
+    harness.set_leader(True)
     harness.begin_with_initial_hooks()
     charm = harness.charm
     assert isinstance(charm.unit.status, BlockedStatus)
@@ -171,3 +172,133 @@ def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog):
     }
 
     caplog.clear()
+
+
+def test_install_or_upgrade_skips_apply_on_non_leader(harness):
+    harness.begin()
+    harness.set_leader(False)
+    charm = harness.charm
+    controller = mock.MagicMock()
+    charm.collector.manifests = {"storage": controller}
+    charm.stored.config_hash = None
+
+    assert charm._install_or_upgrade(mock.MagicMock(), config_hash=1) is True
+    controller.apply_manifests.assert_not_called()
+
+
+def test_install_or_upgrade_applies_on_leader(harness):
+    harness.begin()
+    harness.set_leader(True)
+    charm = harness.charm
+    controller = mock.MagicMock()
+    charm.collector.manifests = {"storage": controller}
+    charm.stored.config_hash = None
+
+    assert charm._install_or_upgrade(mock.MagicMock(), config_hash=1) is True
+    controller.apply_manifests.assert_called_once_with()
+
+
+def test_cleanup_skips_delete_on_non_leader(harness):
+    harness.begin()
+    harness.set_leader(False)
+    charm = harness.charm
+    controller = mock.MagicMock()
+    charm.collector.manifests = {"storage": controller}
+    charm.stored.config_hash = 1
+
+    with mock.patch.object(
+        CinderCSICharm,
+        "_kubeconfig_path",
+        new_callable=mock.PropertyMock,
+        return_value=Path("/__missing__/kubeconfig"),
+    ):
+        charm._cleanup(mock.MagicMock())
+
+    controller.delete_manifests.assert_not_called()
+
+
+def test_cleanup_removes_kubeconfig(harness):
+    harness.begin()
+    charm = harness.charm
+
+    # Mock the kubeconfig path to avoid actual filesystem operations.
+    mock_path = mock.MagicMock(spec=Path)
+    mock_parent = mock.MagicMock(spec=Path)
+    mock_parent.is_dir.return_value = False
+    mock_parent.exists.return_value = True
+    mock_path.parent = mock_parent
+
+    with mock.patch.object(
+        CinderCSICharm,
+        "_kubeconfig_path",
+        new_callable=mock.PropertyMock,
+        return_value=mock_path,
+    ):
+        charm._cleanup(mock.MagicMock())
+
+    mock_parent.unlink.assert_called_once_with(missing_ok=True)
+
+
+def test_pre_teardown_skips_if_not_leader(harness):
+    harness.begin()
+    harness.set_leader(False)
+    charm = harness.charm
+    controller = mock.MagicMock()
+    charm.collector.manifests = {"storage": controller}
+    charm.stored.config_hash = 1
+
+    charm._pre_teardown(mock.MagicMock())
+
+    controller.delete_manifests.assert_not_called()
+
+
+def test_pre_teardown_skips_if_not_removal(harness):
+    harness.begin()
+    harness.set_leader(True)
+    harness.set_planned_units(1)
+    charm = harness.charm
+    controller = mock.MagicMock()
+    charm.collector.manifests = {"storage": controller}
+    charm.stored.config_hash = 1
+
+    charm._pre_teardown(mock.MagicMock())
+
+    controller.delete_manifests.assert_not_called()
+
+
+def test_pre_teardown_deletes_on_removal(harness):
+    harness.begin()
+    harness.set_leader(True)
+    harness.set_planned_units(0)
+    charm = harness.charm
+    controller = mock.MagicMock()
+    charm.collector.manifests = {"storage": controller}
+    charm.stored.config_hash = 1
+
+    charm._pre_teardown(mock.MagicMock())
+
+    controller.delete_manifests.assert_called_once_with(ignore_unauthorized=True)
+    assert charm.stored.config_hash is None
+
+
+def test_pre_teardown_resets_hash_so_cleanup_skips(harness):
+    harness.begin()
+    harness.set_leader(True)
+    harness.set_planned_units(0)
+    charm = harness.charm
+    controller = mock.MagicMock()
+    charm.collector.manifests = {"storage": controller}
+    charm.stored.config_hash = 1
+
+    charm._pre_teardown(mock.MagicMock())
+
+    # _cleanup should now skip deletion since config_hash was cleared
+    with mock.patch.object(
+        CinderCSICharm,
+        "_kubeconfig_path",
+        new_callable=mock.PropertyMock,
+        return_value=Path("/__missing__/kubeconfig"),
+    ):
+        charm._cleanup(mock.MagicMock())
+
+    controller.delete_manifests.assert_called_once_with(ignore_unauthorized=True)
