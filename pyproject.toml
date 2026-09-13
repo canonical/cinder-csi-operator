@@ -42,3 +42,6 @@ classmethod-decorators = "classmethod,validator"
 
 [tool.mypy]
 mypy-path = "src:lib"
+
+[tool.bandit]
+exclude_dirs = [".tox", ".venv", "venv"]
