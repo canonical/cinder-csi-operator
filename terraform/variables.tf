@@ -30,8 +30,8 @@ variable "config" {
   default     = {}
 }
 
-variable "model" {
-  description = "Reference to a `juju_model`."
+variable "model_uuid" {
+  description = "Reference to an existing Juju model UUID."
   type        = string
 }
 
