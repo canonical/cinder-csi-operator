@@ -6,9 +6,11 @@
 import unittest.mock as mock
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
-from ops.model import BlockedStatus, MaintenanceStatus, WaitingStatus
+from ops.manifests import ManifestClientError
+from ops.model import ActiveStatus, BlockedStatus, MaintenanceStatus, WaitingStatus
 from ops.testing import Harness
 
 from charm import CinderCSICharm
@@ -171,3 +173,56 @@ def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog):
     }
 
     caplog.clear()
+
+
+def bad_gateway() -> httpx.HTTPStatusError:
+    """Non-JSON 502 from the API load balancer, which lightkube raises unwrapped."""
+    request = httpx.Request("GET", "https://10.0.0.1:6443/api/v1/nodes")
+    response = httpx.Response(502, request=request, headers={"Content-Type": "text/html"})
+    return httpx.HTTPStatusError(
+        "Server error '502 Bad Gateway'", request=request, response=response
+    )
+
+
+@pytest.fixture()
+def deployed_charm(harness):
+    harness.set_leader(True)
+    harness.begin()
+    charm = harness.charm
+    charm.stored.deployed = True
+    charm.collector = mock.MagicMock()
+    charm.collector.unready = []
+    charm.collector.short_version = "1.0"
+    charm.collector.long_version = "cinder-csi 1.0"
+    return charm
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            ManifestClientError(
+                "Failed to load in cluster CRDs", httpx.ConnectError("No route to host")
+            ),
+            id="manifest client error",
+        ),
+        pytest.param(httpx.ConnectError("No route to host"), id="connect error"),
+        pytest.param(httpx.TimeoutException("timed out"), id="timeout"),
+        pytest.param(httpx.ReadError("connection reset"), id="read error"),
+        pytest.param(bad_gateway(), id="502 from load balancer"),
+    ],
+)
+def test_update_status_waits_when_api_unreachable(deployed_charm, error, caplog):
+    """A transient API error must not leave the unit in a sticky hook error."""
+    type(deployed_charm.collector).unready = mock.PropertyMock(side_effect=error)
+
+    deployed_charm._update_status(None)
+
+    assert deployed_charm.unit.status == WaitingStatus("Waiting for kube-apiserver")
+    assert any("Kubernetes API unreachable" in r.message for r in caplog.records)
+
+
+def test_update_status_active_when_ready(deployed_charm):
+    deployed_charm._update_status(None)
+
+    assert deployed_charm.unit.status == ActiveStatus("Ready")

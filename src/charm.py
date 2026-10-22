@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 
+import httpx
 import ops
 from ops.interface_kube_control import KubeControlRequirer
 from ops.interface_openstack_integration import OpenstackIntegrationRequirer
@@ -17,6 +18,11 @@ from config import CharmConfig
 from storage_manifests import StorageManifests
 
 log = logging.getLogger(__name__)
+
+# Kubernetes API failures surface as ManifestClientError (wrapped by ops.manifests) or as
+# raw httpx errors: connect errors, timeouts, and non-JSON responses such as a 502 from
+# the API load balancer, which lightkube does not convert to ApiError.
+KUBE_API_ERRORS = (ManifestClientError, httpx.HTTPError)
 
 
 class CinderCSICharm(ops.CharmBase):
@@ -106,7 +112,12 @@ class CinderCSICharm(ops.CharmBase):
         if not self.stored.deployed:
             return
 
-        unready = self.collector.unready
+        try:
+            unready = self.collector.unready
+        except KUBE_API_ERRORS as e:
+            log.warning("Kubernetes API unreachable while checking resource readiness: %s", e)
+            self.unit.status = ops.WaitingStatus("Waiting for kube-apiserver")
+            return
         if unready:
             self.unit.status = ops.WaitingStatus(", ".join(unready))
         else:
