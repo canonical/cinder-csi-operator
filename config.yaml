@@ -1,4 +1,12 @@
 options:
+  cluster-name:
+    type: string
+    default: ""
+    description: |
+      Override the cluster name passed to the cinder CSI plugin.
+
+      If unset, the charm uses the kube-control relation cluster tag.
+
   availability-zone:
     type: string
     default: ""
@@ -47,17 +55,66 @@ options:
       https://kubernetes.io/docs/tasks/administer-cluster/change-default-storage-class/
 
       Whether to set the storage class for the Cinder CSI driver as the cluster default
+  storage-class-enabled:
+    type: boolean
+    default: true
+    description: |
+      Whether to create a StorageClass for the Cinder CSI driver.
+
+  storage-class-name:
+    type: string
+    default: "csi-cinder-default"
+    description: |
+      Name of the StorageClass managed by this charm.
+
+  custom-storage-classes:
+    type: string
+    default: ""
+    description: |
+      Optional JSON array of full Kubernetes StorageClass objects.
+
+      Each entry is applied as-is by the charm.
+
+      Example:
+      '[{"apiVersion":"storage.k8s.io/v1","kind":"StorageClass","metadata":{"name":"fast-cinder"},"provisioner":"cinder.csi.openstack.org","reclaimPolicy":"Delete","allowVolumeExpansion":true,"volumeBindingMode":"WaitForFirstConsumer","parameters":{"type":"fast"}}]'
+
+  volume-type:
+    type: string
+    default: ""
+    description: |
+      Optional Cinder volume type to set in StorageClass parameters.
+
+  allow-volume-expansion:
+    type: boolean
+    default: false
+    description: |
+      Whether PVC volume expansion is allowed on the managed StorageClass.
+
+  volume-binding-mode:
+    type: string
+    default: "WaitForFirstConsumer"
+    description: |
+      Kubernetes volume binding mode for the managed StorageClass.
+
+  kubelet-dir:
+    type: string
+    default: "/var/lib/kubelet"
+    description: |
+      Kubelet root directory on worker nodes.
+
+      This controls host paths and registration paths used by the CSI node plugin.
   storage-release:
     type: string
     description: |
       Specify the version of storage-release as defined by the `release`
-      tags of https://github.com/kubernetes/cloud-provider-openstack
-
-      example)
+      tags of https://github.com/kubernetes/cloud-provider-openstack example)
         juju config cinder-csi storage-release='v1.7.3'
 
+      The manifests for the configured version must already be present in this
+      charm source tree under upstream/cloud_storage/manifests.
+      
       A list of supported versions is available through the action:
-        juju run-action cinder-csi/leader list-releases --wait
+        juju run cinder-csi/leader list-versions --wait
 
       To reset by to the latest supported by the charm use:
         juju config cinder-csi --reset storage-release

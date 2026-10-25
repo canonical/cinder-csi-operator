@@ -24,5 +24,8 @@ parts:
     build-packages:
       - git
     charm-python-packages: [setuptools, pip]
+  upstream-manifests:
+    plugin: dump
+    source: .
     prime:
       - upstream/**

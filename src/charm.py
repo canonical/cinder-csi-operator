@@ -5,6 +5,7 @@
 
 import logging
 import os
+import shutil
 from pathlib import Path
 
 import ops
@@ -48,6 +49,7 @@ class CinderCSICharm(ops.CharmBase):
         self.framework.observe(self.on.kube_control_relation_created, self._kube_control)
         self.framework.observe(self.on.kube_control_relation_joined, self._kube_control)
         self.framework.observe(self.on.kube_control_relation_changed, self._merge_config)
+        self.framework.observe(self.on.kube_control_relation_departed, self._pre_teardown)
         self.framework.observe(self.on.kube_control_relation_broken, self._merge_config)
 
         self.framework.observe(self.on.certificates_relation_created, self._merge_config)
@@ -57,6 +59,7 @@ class CinderCSICharm(ops.CharmBase):
         self.framework.observe(self.on.openstack_relation_created, self._merge_config)
         self.framework.observe(self.on.openstack_relation_joined, self._merge_config)
         self.framework.observe(self.on.openstack_relation_changed, self._merge_config)
+        self.framework.observe(self.on.openstack_relation_departed, self._pre_teardown)
         self.framework.observe(self.on.openstack_relation_broken, self._merge_config)
 
         self.framework.observe(self.on.list_versions_action, self._list_versions)
@@ -112,7 +115,8 @@ class CinderCSICharm(ops.CharmBase):
         else:
             self.unit.status = ops.ActiveStatus("Ready")
             self.unit.set_workload_version(self.collector.short_version)
-            self.app.status = ops.ActiveStatus(self.collector.long_version)
+            if self.unit.is_leader():
+                self.app.status = ops.ActiveStatus(self.collector.long_version)
 
     def _kube_control(self, event):
         self.kube_control.set_auth_request(self.unit.name, "system:masters")
@@ -202,6 +206,11 @@ class CinderCSICharm(ops.CharmBase):
             log.info("Skipping until the config is evaluated.")
             return True
 
+        if not self.unit.is_leader():
+            self.unit.status = ops.ActiveStatus("Ready (standby)")
+            log.info("Skipping manifest apply on non-leader unit")
+            return True
+
         self.unit.status = ops.MaintenanceStatus("Deploying Cinder Storage")
         self.unit.set_workload_version("")
         for controller in self.collector.manifests.values():
@@ -214,18 +223,28 @@ class CinderCSICharm(ops.CharmBase):
                 return False
         return True
 
+    def _pre_teardown(self, event):
+        """Delete manifests before a relation is removed, while credentials are still valid."""
+        if not self.unit.is_leader() or not self.stored.config_hash:
+            return
+        if self.app.planned_units() != 0:
+            return
+        self.unit.status = ops.MaintenanceStatus("Cleaning up Openstack Storage")
+        for controller in self.collector.manifests.values():
+            try:
+                controller.delete_manifests(ignore_unauthorized=True)
+            except ManifestClientError:
+                log.warning("Failed to delete manifests during relation teardown")
+        self.stored.config_hash = None
+
     def _cleanup(self, event):
-        if self.stored.config_hash:
-            self.unit.status = ops.MaintenanceStatus("Cleaning up Openstack Storage")
-            for controller in self.collector.manifests.values():
-                try:
-                    controller.delete_manifests(ignore_unauthorized=True)
-                except ManifestClientError:
-                    self.unit.status = ops.WaitingStatus("Waiting for kube-apiserver")
-                    event.defer()
-                    return
         self.unit.status = ops.MaintenanceStatus("Shutting down")
-        self._kubeconfig_path.parent.unlink(missing_ok=True)
+        if self._kubeconfig_path.parent.is_dir() and self._kubeconfig_path.parent.exists():
+            shutil.rmtree(self._kubeconfig_path.parent)
+        elif self._kubeconfig_path.parent.exists():
+            # Copied from similar code in openstack-cloud-controller-operator
+            # Note(Hue): This should never happen but whatever I guess...
+            self._kubeconfig_path.parent.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

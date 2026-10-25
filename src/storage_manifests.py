@@ -3,6 +3,7 @@
 """Implementation of cinder-csi specific details of the kubernetes manifests."""
 
 import datetime
+import json
 import logging
 import pickle
 from hashlib import md5
@@ -27,6 +28,7 @@ log = logging.getLogger(__file__)
 NAMESPACE = "kube-system"
 SECRET_NAME = "csi-cinder-cloud-config"
 STORAGE_CLASS_NAME = "csi-cinder-{type}"
+DEFAULT_KUBELET_DIR = "/var/lib/kubelet"
 OPENSTACK_METADATA_SERVER = "169.254.169.254"
 K8S_DEFAULT_NO_PROXY = [
     "127.0.0.1",
@@ -37,6 +39,20 @@ K8S_DEFAULT_NO_PROXY = [
     "svc.cluster",
     "svc.cluster.local",
 ]
+
+
+def _parse_custom_storage_classes(raw_value: str) -> List[Dict]:
+    if not raw_value:
+        return []
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError:
+        log.warning("Ignoring invalid custom-storage-classes JSON")
+        return []
+    if not isinstance(parsed, list):
+        log.warning("Ignoring custom-storage-classes that is not a JSON list")
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
 
 
 class CreateSecret(Addition):
@@ -77,10 +93,20 @@ class CreateStorageClass(Addition):
 
     def __call__(self) -> Optional[AnyResource]:
         """Craft the storage class object."""
-        storage_name = STORAGE_CLASS_NAME.format(type=self.type)
+        if not self.manifests.config.get("storage-class-enabled", True):
+            log.info("Skipping StorageClass creation because storage-class-enabled=false")
+            return None
+
+        storage_name = self.manifests.config.get(
+            "storage-class-name"
+        ) or STORAGE_CLASS_NAME.format(type=self.type)
         log.info(f"Creating storage class {storage_name}")
         reclaim_policy: str = self.manifests.config.get("reclaim-policy") or "Delete"
         is_default: str = "true" if self.manifests.config.get("storage-class-default") else "false"
+        allow_expansion: bool = bool(self.manifests.config.get("allow-volume-expansion", True))
+        binding_mode: str = (
+            self.manifests.config.get("volume-binding-mode") or "WaitForFirstConsumer"
+        )
 
         sc = from_dict(
             dict(
@@ -92,11 +118,17 @@ class CreateStorageClass(Addition):
                 ),
                 provisioner="cinder.csi.openstack.org",
                 reclaimPolicy=reclaim_policy.title(),
-                volumeBindingMode="WaitForFirstConsumer",
+                allowVolumeExpansion=allow_expansion,
+                volumeBindingMode=binding_mode,
             )
         )
+        parameters = {}
         if az := self.manifests.config.get("availability-zone"):
-            sc.parameters = dict(availability=az)
+            parameters["availability"] = az
+        if volume_type := self.manifests.config.get("volume-type"):
+            parameters["type"] = volume_type
+        if parameters:
+            sc.parameters = parameters
         return sc
 
 
@@ -114,9 +146,72 @@ class UpdateCSIDriver(Patch):
             return
 
         log.info(f"Setting secret for {obj.kind}/{obj.metadata.name}")
+        if obj.kind == "DaemonSet" and obj.metadata.name == "csi-cinder-nodeplugin":
+            self._update_kubelet_dir(obj)
         self._update_node_scheduling(obj)
         self._update_secrets(obj.spec.template.spec.volumes)
         self._update_pod_spec(obj.spec.template.spec.containers)
+
+    def _update_kubelet_dir(self, obj):
+        """Apply kubelet-dir overrides to the nodeplugin DaemonSet."""
+        kubelet_dir = self.manifests.config.get("kubelet-dir") or DEFAULT_KUBELET_DIR
+        if kubelet_dir == DEFAULT_KUBELET_DIR:
+            return
+
+        log.info("Applying kubelet-dir override as %s", kubelet_dir)
+
+        self._update_kubelet_dir_volumes(obj.spec.template.spec.volumes, kubelet_dir)
+        self._update_kubelet_dir_containers(obj.spec.template.spec.containers, kubelet_dir)
+
+    def _update_kubelet_dir_volumes(self, volumes, kubelet_dir: str):
+        """Update hostPath volumes that point at kubelet-managed directories."""
+        volume_paths = {
+            "socket-dir": f"{kubelet_dir}/plugins/cinder.csi.openstack.org",
+            "registration-dir": f"{kubelet_dir}/plugins_registry/",
+            "kubelet-dir": kubelet_dir,
+        }
+
+        for volume in volumes:
+            if volume.hostPath and volume.name in volume_paths:
+                volume.hostPath.path = volume_paths[volume.name]
+
+    def _update_kubelet_dir_containers(self, containers, kubelet_dir: str):
+        """Update container args, env vars, and mounts that use the kubelet dir."""
+        for container in containers:
+            if container.name == "node-driver-registrar":
+                self._update_node_driver_registrar(container, kubelet_dir)
+
+            if container.name == "cinder-csi-plugin":
+                self._update_cinder_plugin_mounts(container, kubelet_dir)
+
+    def _update_node_driver_registrar(self, container, kubelet_dir: str):
+        """Rewrite registrar arguments and env vars to the configured kubelet dir."""
+        for idx, arg in enumerate(container.args):
+            if arg.startswith("--kubelet-registration-path="):
+                prefix, value = arg.split("=", 1)
+                value = self._replace_path_prefix(value, DEFAULT_KUBELET_DIR, kubelet_dir)
+                container.args[idx] = f"{prefix}={value}"
+
+        for env in container.env:
+            if env.name == "DRIVER_REG_SOCK_PATH":
+                env.value = self._replace_path_prefix(
+                    env.value,
+                    DEFAULT_KUBELET_DIR,
+                    kubelet_dir,
+                )
+
+    def _update_cinder_plugin_mounts(self, container, kubelet_dir: str):
+        """Rewrite kubelet-dir volume mounts for the CSI plugin container."""
+        for mount in container.volumeMounts:
+            if mount.name == "kubelet-dir":
+                mount.mountPath = kubelet_dir
+
+    @staticmethod
+    def _replace_path_prefix(value: str, old_prefix: str, new_prefix: str) -> str:
+        """Replace a leading path prefix when the path still uses the default location."""
+        if value.startswith(old_prefix):
+            return value.replace(old_prefix, new_prefix, 1)
+        return value
 
     def _update_node_scheduling(self, obj):
         """Update the node selector and tolerations for the controllerplugin deployment."""
@@ -164,6 +259,30 @@ class UpdateCSIDriver(Patch):
                 container.env.extend(charms.proxylib.container_vars(env))
 
 
+class CreateCustomStorageClasses(Addition):
+    """Create any user-defined custom cinder storage classes."""
+
+    def __call__(self):
+        """Build storage class resources from charm config JSON."""
+        custom_classes = _parse_custom_storage_classes(
+            self.manifests.config.get("custom-storage-classes") or ""
+        )
+        if not custom_classes:
+            return None
+
+        resources = []
+        for entry in custom_classes:
+            try:
+                resources.append(from_dict(entry))
+            except Exception as ex:
+                log.warning("Ignoring invalid custom storage class entry %s", ex)
+
+        if not resources:
+            return None
+
+        return resources
+
+
 class StorageManifests(Manifests):
     """Deployment Specific details for the cinder-csi-driver."""
 
@@ -177,6 +296,7 @@ class StorageManifests(Manifests):
                 ManifestLabel(self),
                 ConfigRegistry(self),
                 CreateStorageClass(self, "default"),  # creates csi-cinder-default
+                CreateCustomStorageClasses(self),
                 UpdateCSIDriver(self),  # update secrets, specs, env-vars
             ],
         )
@@ -187,9 +307,20 @@ class StorageManifests(Manifests):
     @property
     def config(self) -> Dict:
         """Returns current config available from charm config and joined relations."""
+        cluster_name = self.charm_config.available_data.get("cluster-name")
         if labels := self.kube_control.get_controller_labels():
             stable_sort = sorted(labels, key=lambda val: val.key)
-            controller_labels = {label.key: label.value for label in stable_sort}
+            # A value of '-' is a remove-label sentinel from kube-control,
+            # not a valid Kubernetes nodeSelector value.
+            controller_labels = {}
+            for label in stable_sort:
+                if label.value == "-":
+                    log.info(
+                        "Skipping controller label %s because value '-' indicates removal",
+                        label.key,
+                    )
+                    continue
+                controller_labels[label.key] = label.value
         else:
             # the controller labels are sourced from juju config on either
             # the k8s or kubernetes-control-plane charm.
@@ -198,10 +329,15 @@ class StorageManifests(Manifests):
             # in order to make sure the cinder controllers land on controller
             # nodes we can just fallback to this well-known label
             log.warning("No controller labels found, using fallback")
-            controller_labels = {"juju-application": self.kube_control.relation.app.name}
+            relation = self.kube_control.relation
+            if relation and relation.app:
+                controller_labels = {"juju-application": relation.app.name}
+            else:
+                # During teardown the kube-control relation may already be gone.
+                controller_labels = {}
         config = {
             "image-registry": self.kube_control.get_registry_location(),
-            "cluster-name": self.kube_control.get_cluster_tag(),
+            "cluster-name": cluster_name or self.kube_control.get_cluster_tag(),
             "cloud-conf": (val := self.integrator.cloud_conf_b64) and val.decode(),
             "control-node-selector": controller_labels,
             "control-node-taints": self.kube_control.get_controller_taints()
@@ -225,6 +361,14 @@ class StorageManifests(Manifests):
 
     def evaluate(self) -> Optional[str]:
         """Determine if manifest_config can be applied to manifests."""
+        configured_release = self.config.get("release")
+        if configured_release and configured_release not in self.releases:
+            supported = ", ".join(self.releases)
+            return (
+                f"storage-release '{configured_release}' is not supported. "
+                f"Available releases: {supported}"
+            )
+
         for prop in ["cloud-conf"]:
             if not self.config.get(prop):
                 return f"Storage manifests waiting for definition of {prop}"
