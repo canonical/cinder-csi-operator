@@ -133,6 +133,31 @@ def test_patch_csi_driver(resource, name, storage, respect_proxy, no_proxy):
         assert "no_proxy" not in keys
 
 
+def test_default_controller_api_bypasses_proxy(storage, respect_proxy, no_proxy):
+    """The default controller plugin reaches the in-cluster API without the proxy."""
+    assert storage.current_release == storage.default_release
+    (controller,) = [
+        r.resource
+        for r in storage.resources
+        if r.kind == "Deployment" and r.name == "csi-cinder-controllerplugin"
+    ]
+    (plugin,) = [
+        c for c in controller.spec.template.spec.containers if c.name == "cinder-csi-plugin"
+    ]
+    proxy_keys = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
+    proxy_env = {e.name: e.value for e in plugin.env if e.name.upper() in proxy_keys}
+    if not respect_proxy:
+        assert proxy_env == {}
+        return
+
+    assert proxy_env["HTTPS_PROXY"] == proxy_env["https_proxy"] == PROXY_URL_1
+    user_no_proxy = [e for e in no_proxy.split(",") if e]
+    for key in ("NO_PROXY", "no_proxy"):
+        entries = proxy_env[key].split(",")
+        assert storage_manifests.K8S_API_NO_PROXY in entries
+        assert all(entry in entries for entry in user_no_proxy)
+
+
 @pytest.mark.parametrize(
     "taints,expected",
     [
