@@ -28,6 +28,9 @@ NAMESPACE = "kube-system"
 SECRET_NAME = "csi-cinder-cloud-config"
 STORAGE_CLASS_NAME = "csi-cinder-{type}"
 OPENSTACK_METADATA_SERVER = "169.254.169.254"
+# client-go's in-cluster config dials KUBERNETES_SERVICE_HOST (the API Service IP);
+# kubelet expands this reference from the pod's service environment at container start.
+K8S_API_NO_PROXY = "$(KUBERNETES_SERVICE_HOST)"
 K8S_DEFAULT_NO_PROXY = [
     "127.0.0.1",
     OPENSTACK_METADATA_SERVER,  # this should always skip the proxy
@@ -36,6 +39,7 @@ K8S_DEFAULT_NO_PROXY = [
     "svc",
     "svc.cluster",
     "svc.cluster.local",
+    K8S_API_NO_PROXY,  # the plugin's PVC informer must reach the API directly
 ]
 
 
