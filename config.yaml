@@ -49,6 +49,7 @@ options:
       Whether to set the storage class for the Cinder CSI driver as the cluster default
   storage-release:
     type: string
+    default: "v1.36.0"
     description: |
       Specify the version of storage-release as defined by the `release`
       tags of https://github.com/kubernetes/cloud-provider-openstack
@@ -59,7 +60,7 @@ options:
       A list of supported versions is available through the action:
         juju run-action cinder-csi/leader list-releases --wait
 
-      To reset by to the latest supported by the charm use:
+      To reset to the charm's default release use:
         juju config cinder-csi --reset storage-release
 
       The current release deployed is available by viewing

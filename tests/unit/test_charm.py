@@ -171,3 +171,42 @@ def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog):
     }
 
     caplog.clear()
+
+
+@pytest.mark.usefixtures("integrator", "certificates")
+def test_refresh_rolls_out_new_default_release(harness, kube_control, lk_client):
+    """A refresh that only bumps the storage-release default re-applies the manifests."""
+    kube_control.get_cluster_tag.return_value = "k8s-cluster-name"
+    schema = yaml.safe_load(Path("config.yaml").read_text())
+    default = schema["options"]["storage-release"]["default"]
+    assert Path("upstream/cloud_storage/version").read_text().strip() == default
+
+    harness.begin()
+    charm = harness.charm
+    (storage,) = charm.collector.manifests.values()
+
+    # Previously deployed revision: storage-release had no schema default.
+    with harness.hooks_disabled():
+        harness.update_config({"storage-release": ""})
+    assert storage.config["release"] is None
+    charm.stored.config_hash = previous_hash = storage.hash()
+    charm.stored.deployed = True
+
+    # Refresh: the option falls back to the new schema default.
+    with harness.hooks_disabled():
+        harness.update_config(unset=["storage-release"])
+    assert storage.config["release"] == storage.current_release == default
+    lk_client.apply.reset_mock()
+
+    charm.on.config_changed.emit()
+
+    applied = [c.args[0] for c in lk_client.apply.call_args_list]
+    (controller,) = [
+        r
+        for r in applied
+        if r.kind == "Deployment" and r.metadata.name == "csi-cinder-controllerplugin"
+    ]
+    images = {c.name: c.image for c in controller.spec.template.spec.containers}
+    assert images["cinder-csi-plugin"].endswith(f"/cinder-csi-plugin:{default}")
+    assert charm.stored.config_hash == storage.hash() != previous_hash
+    assert charm.stored.deployed
