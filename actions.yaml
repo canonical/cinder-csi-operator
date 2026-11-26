@@ -43,3 +43,12 @@ sync-resources:
         Space separated list of kubernetes resource types
         to use a filter during the sync. This helps limit
         which missing resources are applied.
+prepare-uninstall:
+  description: Pause reconciliation across the application before uninstalling.
+uninstall:
+  description: Remove this installation's CSI resources without deleting volumes.
+  params:
+    legacy-uids:
+      type: string
+      default: ""
+      description: Comma-separated UIDs of reviewed legacy resources to remove.

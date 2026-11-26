@@ -3,15 +3,21 @@
 #
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
+import json
 import unittest.mock as mock
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
 import pytest
 import yaml
+from lightkube import ApiError, Client
 from ops.model import BlockedStatus, MaintenanceStatus, WaitingStatus
-from ops.testing import Harness
+from ops.testing import ActionFailed, Harness
 
 from charm import CinderCSICharm
+from uninstall import DRIVER, INSTALLATION, INSTALLED_UID
 
 
 @pytest.fixture
@@ -129,7 +135,13 @@ def test_waits_for_certificates(harness):
 
 @mock.patch("ops.interface_kube_control.KubeControlRequirer.create_kubeconfig")
 @pytest.mark.usefixtures("integrator", "certificates")
-def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog):
+def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog, lk_client):
+    lk_client.get.side_effect = ApiError(
+        response=httpx.Response(404, json={"kind": "Status", "message": "Not found"})
+    )
+    lk_client.create.return_value = SimpleNamespace(
+        metadata=SimpleNamespace(uid="created", annotations=None, resourceVersion="1")
+    )
     harness.begin_with_initial_hooks()
     charm = harness.charm
     assert isinstance(charm.unit.status, BlockedStatus)
@@ -171,3 +183,210 @@ def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog):
     }
 
     caplog.clear()
+
+
+@pytest.fixture
+def ready_cinder(harness, mock_kubeconfig, mock_ca_cert):
+    harness.set_leader(True)
+    harness.begin()
+    harness.add_relation("cinder-peers", "cinder-csi")
+    harness.add_relation("kube-control", "kubernetes-control-plane")
+    mock_kubeconfig.write_text("""current-context: test
+clusters:
+- name: test
+  cluster: {server: https://k8s.example}
+contexts:
+- name: test
+  context: {cluster: test, user: test}
+users:
+- name: test
+  user: {token: test}
+""")
+    mock_ca_cert.write_text("test CA")
+    return harness.charm
+
+
+def test_stop_after_detaching_never_contacts_kubernetes(
+    harness, ready_cinder, mock_kubeconfig, mock_ca_cert, lk_client, monkeypatch
+):
+    relation = ready_cinder.model.get_relation("kube-control")
+    harness.remove_relation(relation.id)
+    unrelated = mock_kubeconfig.parent / "unrelated"
+    unrelated.touch()
+    monkeypatch.setattr(
+        "charm.Client", mock.Mock(side_effect=AssertionError("API call from stop"))
+    )
+
+    ready_cinder.on.stop.emit()
+    ready_cinder.on.stop.emit()
+
+    assert not mock_kubeconfig.exists()
+    assert not mock_ca_cert.exists()
+    assert unrelated.exists()
+    assert not lk_client.mock_calls
+
+
+SECRET = "/api/v1/namespaces/kube-system/secrets"
+ATTACHMENTS = "/apis/storage.k8s.io/v1/volumeattachments"
+
+
+@pytest.fixture
+def cluster(ready_cinder, monkeypatch):
+    app_labels = {"juju.io/application": "cinder-csi", "juju.io/manifest": "cinder-csi-driver"}
+    installation = ready_cinder.storage_manifests.installation
+    objects = {
+        SECRET: [
+            {
+                "metadata": {
+                    "name": "csi-cinder-cloud-config",
+                    "namespace": "kube-system",
+                    "uid": "own-uid",
+                    "labels": {**app_labels, INSTALLATION: installation},
+                    "annotations": {INSTALLED_UID: "own-uid"},
+                },
+            },
+            {
+                "metadata": {
+                    "name": "foreign",
+                    "namespace": "kube-system",
+                    "uid": "foreign-uid",
+                    "labels": {**app_labels, INSTALLATION: "another-installation"},
+                },
+            },
+        ],
+    }
+
+    def api(request):
+        path = request.url.path
+        if request.method == "DELETE":
+            collection, name = path.rsplit("/", 1)
+            uid = json.loads(request.content)["preconditions"]["uid"]
+            entries = objects[collection]
+            for entry in entries:
+                if entry["metadata"]["name"] != name:
+                    continue
+                if replacement_uid := entry.pop("replace-on-delete", None):
+                    entry["metadata"]["uid"] = replacement_uid
+                if entry["metadata"]["uid"] != uid:
+                    return httpx.Response(409, json={"kind": "Status", "message": "UID mismatch"})
+                entries.remove(entry)
+                return httpx.Response(200, json={"kind": "Status"})
+            return httpx.Response(404, json={"kind": "Status", "message": "Not found"})
+        selector = dict(
+            pair.split("=")
+            for pair in request.url.params.get("labelSelector", "").split(",")
+            if pair
+        )
+        return httpx.Response(
+            200,
+            json={
+                "metadata": {},
+                "items": [
+                    obj
+                    for obj in objects.get(path, [])
+                    if selector.items() <= obj["metadata"].get("labels", {}).items()
+                ],
+            },
+        )
+
+    monkeypatch.setattr("charm.Client", partial(Client, transport=httpx.MockTransport(api)))
+    return objects
+
+
+def test_uninstall_waits_for_peers_and_preserves_foreign_objects(harness, ready_cinder, cluster):
+    peer_id = ready_cinder.model.get_relation("cinder-peers").id
+    harness.add_relation_unit(peer_id, "cinder-csi/1")
+    harness.run_action("prepare-uninstall")
+
+    assert harness.run_action("uninstall").results["state"] == "waiting"
+    assert len(cluster[SECRET]) == 2
+    with pytest.raises(ActionFailed, match="reconciliation is paused"):
+        harness.run_action("sync-resources")
+
+    harness.update_relation_data(peer_id, "cinder-csi/1", {"uninstall-paused": "true"})
+    assert harness.run_action("uninstall").results["state"] == "removed"
+    assert [obj["metadata"]["uid"] for obj in cluster[SECRET]] == ["foreign-uid"]
+    assert harness.run_action("uninstall").results["state"] == "removed"
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_uninstall_rejects_live_cinder_attachment(harness, cluster, prepared):
+    if prepared:
+        harness.run_action("prepare-uninstall")
+    cluster[ATTACHMENTS] = [
+        {
+            "metadata": {"name": "in-use"},
+            "spec": {"attacher": DRIVER, "nodeName": "node", "source": {}},
+        }
+    ]
+
+    with pytest.raises(ActionFailed, match="Cinder VolumeAttachment still exists"):
+        harness.run_action("uninstall" if prepared else "prepare-uninstall")
+    assert len(cluster[SECRET]) == 2
+
+
+def test_uninstall_requires_exact_legacy_uid_confirmation(harness, cluster):
+    # A same-name replacement copied the installation marker, but not its Kubernetes UID.
+    cluster[SECRET][0]["metadata"]["uid"] = "replacement"
+    harness.run_action("prepare-uninstall")
+
+    with pytest.raises(ActionFailed, match="Verify the listed legacy objects") as failed:
+        harness.run_action("uninstall", {"legacy-uids": "own-uid"})
+    assert failed.value.output.results["legacy-objects"].endswith(" replacement")
+    assert len(cluster[SECRET]) == 2
+
+    assert harness.run_action("uninstall", {"legacy-uids": "replacement"}).results == {
+        "state": "removed"
+    }
+    assert [obj["metadata"]["uid"] for obj in cluster[SECRET]] == ["foreign-uid"]
+
+
+def test_uninstall_preserves_objects_replaced_between_list_and_delete(harness, cluster):
+    harness.run_action("prepare-uninstall")
+    cluster[SECRET][0]["replace-on-delete"] = "replacement"
+
+    with pytest.raises(ActionFailed, match="UID mismatch"):
+        harness.run_action("uninstall")
+
+    assert [obj["metadata"]["uid"] for obj in cluster[SECRET]] == ["replacement", "foreign-uid"]
+
+
+def test_uninstall_preserves_volume_objects_and_refuses_a_live_consumer(harness, cluster):
+    pvs = "/api/v1/persistentvolumes"
+    pvcs = "/api/v1/persistentvolumeclaims"
+    pods = "/api/v1/pods"
+    cluster[pvs] = [
+        {
+            "metadata": {"name": "pv"},
+            "spec": {
+                "claimRef": {"namespace": "test", "name": "claim"},
+                "csi": {"driver": DRIVER, "volumeHandle": "volume"},
+            },
+        }
+    ]
+    cluster[pvcs] = [
+        {
+            "metadata": {"namespace": "test", "name": "claim"},
+            "spec": {"volumeName": "pv"},
+            "status": {"phase": "Bound"},
+        }
+    ]
+    cluster[pods] = [
+        {
+            "metadata": {"namespace": "test", "name": "consumer"},
+            "spec": {
+                "containers": [],
+                "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "claim"}}],
+            },
+        }
+    ]
+
+    with pytest.raises(ActionFailed, match="Pod still uses Cinder: test/consumer"):
+        harness.run_action("prepare-uninstall")
+    assert len(cluster[SECRET]) == 2
+
+    del cluster[pods]
+    harness.run_action("prepare-uninstall")
+    assert harness.run_action("uninstall").results["state"] == "removed"
+    assert [pv["metadata"]["name"] for pv in cluster[pvs]] == ["pv"]
+    assert [pvc["metadata"]["name"] for pvc in cluster[pvcs]] == ["claim"]
