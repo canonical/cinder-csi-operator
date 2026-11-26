@@ -5,9 +5,12 @@
 
 import logging
 import os
+from errno import EEXIST, ENOTEMPTY
 from pathlib import Path
 
 import ops
+from httpx import HTTPError
+from lightkube.core.exceptions import ConfigError
 from ops.interface_kube_control import KubeControlRequirer
 from ops.interface_openstack_integration import OpenstackIntegrationRequirer
 from ops.interface_tls_certificates import CertificatesRequires
@@ -41,9 +44,10 @@ class CinderCSICharm(ops.CharmBase):
             config_hash=None,  # hashed value of the config once valid
             deployed=False,  # True if the config has been applied after new hash
         )
-        self.collector = Collector(
-            StorageManifests(self, self.charm_config, self.kube_control, self.integrator),
+        self.storage_manifests = StorageManifests(
+            self, self.charm_config, self.kube_control, self.integrator
         )
+        self.collector = Collector(self.storage_manifests)
 
         self.framework.observe(self.on.kube_control_relation_created, self._kube_control)
         self.framework.observe(self.on.kube_control_relation_joined, self._kube_control)
@@ -214,18 +218,29 @@ class CinderCSICharm(ops.CharmBase):
                 return False
         return True
 
-    def _cleanup(self, event):
-        if self.stored.config_hash:
-            self.unit.status = ops.MaintenanceStatus("Cleaning up Openstack Storage")
-            for controller in self.collector.manifests.values():
-                try:
-                    controller.delete_manifests(ignore_unauthorized=True)
-                except ManifestClientError:
-                    self.unit.status = ops.WaitingStatus("Waiting for kube-apiserver")
-                    event.defer()
-                    return
-        self.unit.status = ops.MaintenanceStatus("Shutting down")
-        self._kubeconfig_path.parent.unlink(missing_ok=True)
+    def _cleanup(self, _):
+        kubeconfig = self._kubeconfig_path
+        self.unit.status = ops.MaintenanceStatus("Cleaning up OpenStack storage")
+        try:
+            if self.stored.config_hash is None:
+                return
+            if kubeconfig.is_file():
+                self.storage_manifests.delete_installed_manifests(kubeconfig)
+            else:
+                log.warning("Kubernetes cleanup incomplete: kubeconfig is missing")
+        except (ConfigError, HTTPError, OSError) as exc:
+            log.warning("Kubernetes cleanup incomplete: %s", exc)
+        finally:
+            self.unit.status = ops.MaintenanceStatus("Shutting down")
+            kubeconfig.unlink(missing_ok=True)
+            self._ca_cert_path.unlink(missing_ok=True)
+            try:
+                kubeconfig.parent.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if exc.errno not in (ENOTEMPTY, EEXIST):
+                    raise
 
 
 if __name__ == "__main__":

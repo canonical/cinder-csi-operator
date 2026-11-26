@@ -6,12 +6,18 @@ import datetime
 import logging
 import pickle
 from hashlib import md5
+from pathlib import Path
 from typing import Dict, List, Optional, cast
 
 import charms.proxylib
-from lightkube import Client
+from lightkube import ApiError, Client
 from lightkube.codecs import AnyResource, from_dict
+from lightkube.config.kubeconfig import KubeConfig
 from lightkube.models.core_v1 import Event, Pod, Taint, Toleration
+from lightkube.resources.apps_v1 import DaemonSet, Deployment
+from lightkube.resources.core_v1 import Secret, ServiceAccount
+from lightkube.resources.rbac_authorization_v1 import ClusterRole, ClusterRoleBinding
+from lightkube.resources.storage_v1 import CSIDriver, StorageClass
 from ops.interface_kube_control import KubeControlRequirer
 from ops.manifests import (
     Addition,
@@ -20,6 +26,7 @@ from ops.manifests import (
     ManifestLabel,
     Manifests,
     Patch,
+    literals,
 )
 from ops.manifests.manipulations import AnyCondition
 
@@ -229,6 +236,28 @@ class StorageManifests(Manifests):
             if not self.config.get(prop):
                 return f"Storage manifests waiting for definition of {prop}"
         return None
+
+    def delete_installed_manifests(self, kubeconfig: Path) -> None:
+        """Delete owned CSI objects without rendering manifests from relation data."""
+        client = Client(config=KubeConfig.from_file(kubeconfig))
+        labels = {literals.APP_LABEL: self.model.app.name, literals.MANIFEST_LABEL: self.name}
+        # Include the Secret and StorageClass generated alongside the bundled manifests.
+        for kind, namespace in (
+            (Deployment, NAMESPACE),
+            (DaemonSet, NAMESPACE),
+            (Secret, NAMESPACE),
+            (ServiceAccount, NAMESPACE),
+            (CSIDriver, None),
+            (StorageClass, None),
+            (ClusterRoleBinding, None),
+            (ClusterRole, None),
+        ):
+            for obj in client.list(kind, namespace=namespace, labels=labels):
+                try:
+                    client.delete(kind, obj.metadata.name, namespace=namespace)
+                except ApiError as exc:
+                    if exc.response.status_code != 404:
+                        raise
 
     def is_ready(self, obj: HashableResource, cond: AnyCondition) -> Optional[bool]:
         """Determine if the resource is ready."""

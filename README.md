@@ -33,6 +33,14 @@ juju relate cinder-csi:openstack  openstack-integrator:clients
 * Deploy the `cinder-csi` charm in the model relating to the integrator and to charmed-kubernetes components
 * Once the model is active/idle, the storage charm will have successfully deployed the cinder-csi in the `kube-system` namespace
 
+## Removal
+
+Remove the application before manually detaching `kube-control`. The charm
+deletes its labelled CSI resources while it still has Kubernetes API access.
+It does not delete PVCs or PVs. If the charm logs `Kubernetes cleanup incomplete`,
+a cluster administrator should inspect the remaining CSI resources labelled
+`juju.io/application=<application name>` and `juju.io/manifest=cinder-csi-driver`.
+
 ## Contributing
 
 Please see the [Juju SDK docs](https://juju.is/docs/sdk) for guidelines

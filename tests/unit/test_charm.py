@@ -4,10 +4,13 @@
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
 import unittest.mock as mock
+from functools import partial
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
+from lightkube import Client
 from ops.model import BlockedStatus, MaintenanceStatus, WaitingStatus
 from ops.testing import Harness
 
@@ -171,3 +174,93 @@ def test_waits_for_kube_control(mock_create_kubeconfig, harness, caplog):
     }
 
     caplog.clear()
+
+
+@pytest.fixture
+def detached_cinder(harness, mock_kubeconfig, mock_ca_cert):
+    """Leave a configured unit with local API credentials but no kube-control relation."""
+    harness.begin()
+    relation = harness.add_relation("kube-control", "kubernetes-control-plane")
+    harness.charm.stored.config_hash = 1
+    harness.remove_relation(relation)
+    mock_kubeconfig.write_text("""current-context: test
+clusters:
+- name: test
+  cluster: {server: https://k8s.example}
+contexts:
+- name: test
+  context: {cluster: test, user: test}
+users:
+- name: test
+  user: {token: test}
+""")
+    mock_ca_cert.write_text("test CA")
+    return harness.charm
+
+
+def test_stop_removes_owned_resources_after_kube_control_is_removed(
+    detached_cinder, mock_kubeconfig, monkeypatch
+):
+    ownership = {
+        "juju.io/application": detached_cinder.app.name,
+        "juju.io/manifest": "cinder-csi-driver",
+    }
+    deployments = "/apis/apps/v1/namespaces/kube-system/deployments"
+    drivers = "/apis/storage.k8s.io/v1/csidrivers"
+    objects = {
+        deployments: {
+            "csi-cinder-controllerplugin": ownership,
+            "other-app": {**ownership, "juju.io/application": "other-app"},
+            "other-manifest": {**ownership, "juju.io/manifest": "other-manifest"},
+        },
+        drivers: {"cinder.csi.openstack.org": ownership},
+    }
+
+    def api(request):
+        path = request.url.path
+        if request.method == "DELETE":
+            collection, name = path.rsplit("/", 1)
+            del objects[collection][name]
+            return httpx.Response(200, json={"kind": "Status", "apiVersion": "v1"})
+        selector = dict(pair.split("=") for pair in request.url.params["labelSelector"].split(","))
+        items = [
+            {"metadata": {"name": name, "labels": labels}, "spec": {}}
+            for name, labels in objects.get(path, {}).items()
+            if selector.items() <= labels.items()
+        ]
+        return httpx.Response(200, json={"metadata": {}, "items": items})
+
+    monkeypatch.setattr(
+        "storage_manifests.Client", partial(Client, transport=httpx.MockTransport(api))
+    )
+    detached_cinder.on.stop.emit()
+
+    assert objects == {
+        deployments: {
+            "other-app": {**ownership, "juju.io/application": "other-app"},
+            "other-manifest": {**ownership, "juju.io/manifest": "other-manifest"},
+        },
+        drivers: {},
+    }
+    assert not mock_kubeconfig.parent.exists()
+
+
+def test_stop_reports_unauthorized_cleanup_and_removes_local_credentials(
+    detached_cinder, mock_kubeconfig, mock_ca_cert, monkeypatch, caplog
+):
+    unrelated = mock_kubeconfig.parent / "unrelated"
+    unrelated.touch()
+
+    def api(request):
+        assert request.method == "GET"
+        return httpx.Response(401, json={"kind": "Status", "code": 401, "message": "Unauthorized"})
+
+    monkeypatch.setattr(
+        "storage_manifests.Client", partial(Client, transport=httpx.MockTransport(api))
+    )
+    detached_cinder.on.stop.emit()
+
+    assert "Kubernetes cleanup incomplete: Unauthorized" in caplog.text
+    assert not mock_kubeconfig.exists()
+    assert not mock_ca_cert.exists()
+    assert unrelated.exists()
