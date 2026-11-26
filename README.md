@@ -35,11 +35,29 @@ juju relate cinder-csi:openstack  openstack-integrator:clients
 
 ## Removal
 
-Remove the application before manually detaching `kube-control`. The charm
-deletes its labelled CSI resources while it still has Kubernetes API access.
-It does not delete PVCs or PVs. If the charm logs `Kubernetes cleanup incomplete`,
-a cluster administrator should inspect the remaining CSI resources labelled
-`juju.io/application=<application name>` and `juju.io/manifest=cinder-csi-driver`.
+Stop workloads that use Cinder and wait for detach and provisioning to finish.
+Keep `kube-control` connected. Do not start new Cinder workloads, scale either
+charm, or refresh the charm during uninstall.
+
+Run the ordered uninstall (requires `juju` and `jq`):
+
+```bash
+bash scripts/uninstall-cinder-csi.sh <model> cinder-csi
+```
+
+The workflow pauses reconciliation on all Cinder units, checks storage usage,
+and removes only confirmed CSI resources, including the cloud-config Secret.
+It does not delete PVCs, PVs, or Cinder volumes. The Juju application is removed
+only after the charm confirms Kubernetes cleanup; otherwise the application
+and its relations remain in place so the same command can be retried.
+
+Objects created before ownership tracking, or whose recorded UID no longer
+matches, require explicit approval. Review the `legacy-objects` result and
+rerun with a comma-separated list of the verified UIDs as the third argument.
+Do not approve objects that belong to another installation.
+
+Plain `juju remove-application` only cleans up local unit credentials. It can
+leave the CSI driver and its Kubernetes Secret behind.
 
 ## Contributing
 

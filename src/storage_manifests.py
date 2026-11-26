@@ -6,23 +6,20 @@ import datetime
 import logging
 import pickle
 from hashlib import md5
-from pathlib import Path
 from typing import Dict, List, Optional, cast
 
 import charms.proxylib
+from httpx import HTTPError
 from lightkube import ApiError, Client
 from lightkube.codecs import AnyResource, from_dict
-from lightkube.config.kubeconfig import KubeConfig
 from lightkube.models.core_v1 import Event, Pod, Taint, Toleration
-from lightkube.resources.apps_v1 import DaemonSet, Deployment
-from lightkube.resources.core_v1 import Secret, ServiceAccount
-from lightkube.resources.rbac_authorization_v1 import ClusterRole, ClusterRoleBinding
-from lightkube.resources.storage_v1 import CSIDriver, StorageClass
+from lightkube.types import PatchType
 from ops.interface_kube_control import KubeControlRequirer
 from ops.manifests import (
     Addition,
     ConfigRegistry,
     HashableResource,
+    ManifestClientError,
     ManifestLabel,
     Manifests,
     Patch,
@@ -30,8 +27,9 @@ from ops.manifests import (
 )
 from ops.manifests.manipulations import AnyCondition
 
+from uninstall import DRIVER, INSTALLATION, INSTALLED_UID, NAMESPACE, UninstallError
+
 log = logging.getLogger(__file__)
-NAMESPACE = "kube-system"
 SECRET_NAME = "csi-cinder-cloud-config"
 STORAGE_CLASS_NAME = "csi-cinder-{type}"
 OPENSTACK_METADATA_SERVER = "169.254.169.254"
@@ -97,7 +95,7 @@ class CreateStorageClass(Addition):
                     name=storage_name,
                     annotations={"storageclass.kubernetes.io/is-default-class": is_default},
                 ),
-                provisioner="cinder.csi.openstack.org",
+                provisioner=DRIVER,
                 reclaimPolicy=reclaim_policy.title(),
                 volumeBindingMode="WaitForFirstConsumer",
             )
@@ -237,27 +235,81 @@ class StorageManifests(Manifests):
                 return f"Storage manifests waiting for definition of {prop}"
         return None
 
-    def delete_installed_manifests(self, kubeconfig: Path) -> None:
-        """Delete owned CSI objects without rendering manifests from relation data."""
-        client = Client(config=KubeConfig.from_file(kubeconfig))
-        labels = {literals.APP_LABEL: self.model.app.name, literals.MANIFEST_LABEL: self.name}
-        # Include the Secret and StorageClass generated alongside the bundled manifests.
-        for kind, namespace in (
-            (Deployment, NAMESPACE),
-            (DaemonSet, NAMESPACE),
-            (Secret, NAMESPACE),
-            (ServiceAccount, NAMESPACE),
-            (CSIDriver, None),
-            (StorageClass, None),
-            (ClusterRoleBinding, None),
-            (ClusterRole, None),
+    @property
+    def installation(self) -> str:
+        """Return the identity of this Juju application installation."""
+        peer = self.model.get_relation("cinder-peers")
+        if peer is None:
+            raise UninstallError("Cinder CSI peer relation is not ready")
+        return f"{self.model.uuid}-{peer.id}"
+
+    def apply_resources(self, *resources: HashableResource):
+        """Mark objects we create, without claiming existing unmarked objects."""
+        installation = self.installation
+        for resource in resources:
+            try:
+                self._apply_resource(resource, installation)
+            except (HTTPError, UninstallError) as exc:
+                raise ManifestClientError(f"Failed applying {resource}: {exc}") from exc
+
+    def _apply_resource(self, resource: HashableResource, installation: str) -> None:
+        desired = resource.resource
+        try:
+            current = self.client.get(type(desired), resource.name, namespace=resource.namespace)
+        except ApiError as exc:
+            if exc.response.status_code != 404:
+                raise
+            desired.metadata.labels[INSTALLATION] = installation
+            created = self.client.create(desired)
+            uid = created.metadata.uid
+            if not uid:
+                raise UninstallError(f"Kubernetes did not return a UID for {resource}")
+            checks = [{"op": "test", "path": "/metadata/uid", "value": uid}]
+            if created.metadata.annotations:
+                key = INSTALLED_UID.replace("/", "~1")
+                annotation = {"op": "add", "path": f"/metadata/annotations/{key}", "value": uid}
+            else:
+                checks.append(
+                    {
+                        "op": "test",
+                        "path": "/metadata/resourceVersion",
+                        "value": created.metadata.resourceVersion,
+                    }
+                )
+                annotation = {
+                    "op": "add",
+                    "path": "/metadata/annotations",
+                    "value": {INSTALLED_UID: uid},
+                }
+            self.client.patch(
+                type(desired),
+                resource.name,
+                [*checks, annotation],
+                namespace=resource.namespace,
+                patch_type=PatchType.JSON,
+            )
+            return
+
+        labels = current.metadata.labels or {}
+        owner = labels.get(INSTALLATION)
+        if owner == installation:
+            uid = (current.metadata.annotations or {}).get(INSTALLED_UID)
+            if uid is not None and uid != current.metadata.uid:
+                raise UninstallError(f"{resource} no longer matches its installed UID")
+            desired.metadata.labels[INSTALLATION] = installation
+            if uid is not None:
+                desired.metadata.annotations = {
+                    **(desired.metadata.annotations or {}),
+                    INSTALLED_UID: uid,
+                }
+        elif (
+            owner is not None
+            or labels.get(literals.APP_LABEL) != self.model.app.name
+            or labels.get(literals.MANIFEST_LABEL) != self.name
         ):
-            for obj in client.list(kind, namespace=namespace, labels=labels):
-                try:
-                    client.delete(kind, obj.metadata.name, namespace=namespace)
-                except ApiError as exc:
-                    if exc.response.status_code != 404:
-                        raise
+            raise UninstallError(f"{resource} belongs to another installation")
+        desired.metadata.resourceVersion = current.metadata.resourceVersion
+        self.client.apply(desired, force=True)
 
     def is_ready(self, obj: HashableResource, cond: AnyCondition) -> Optional[bool]:
         """Determine if the resource is ready."""
